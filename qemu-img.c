@@ -1574,6 +1574,8 @@ typedef struct ImgConvertState {
     int64_t wait_sector_num[MAX_COROUTINES];
     CoMutex lock;
     int ret;
+    const char *extentsfile;
+    BlockBackend *basefile;
 } ImgConvertState;
 
 static void convert_select_part(ImgConvertState *s, int64_t sector_num,
@@ -1684,6 +1686,44 @@ static int coroutine_fn convert_co_read(ImgConvertState *s, int64_t sector_num,
     return 0;
 }
 
+
+static int coroutine_fn convert_co_read_from_basefile(ImgConvertState *s, int64_t sector_num,
+                                                      int nb_sectors, uint8_t *buf)
+{
+    int n, ret;
+    QEMUIOVector qiov;
+    struct iovec iov;
+
+    assert(nb_sectors <= s->buf_sectors);
+    while (nb_sectors > 0) {
+        BlockBackend *blk;
+        int64_t bs_sectors;
+
+        /* In the case of compression with multiple source files, we can get a
+         * nb_sectors that spreads into the next part. So we must be able to
+         * read across multiple BDSes for one convert_read() call. */
+        blk = s->basefile;
+        bs_sectors = s->src_sectors[0];
+
+        n = MIN(nb_sectors, bs_sectors - sector_num);
+        iov.iov_base = buf;
+        iov.iov_len = n << BDRV_SECTOR_BITS;
+        qemu_iovec_init_external(&qiov, &iov, 1);
+
+        ret = blk_co_preadv(
+                blk, (sector_num) << BDRV_SECTOR_BITS,
+                n << BDRV_SECTOR_BITS, &qiov, 0);
+        if (ret < 0) {
+            return ret;
+        }
+
+        sector_num += n;
+        nb_sectors -= n;
+        buf += n * BDRV_SECTOR_SIZE;
+    }
+
+    return 0;
+}
 
 static int coroutine_fn convert_co_write(ImgConvertState *s, int64_t sector_num,
                                          int nb_sectors, uint8_t *buf,
@@ -1811,6 +1851,23 @@ static void coroutine_fn convert_co_do_copy(void *opaque)
                              ": %s", sector_num, strerror(-ret));
                 s->ret = ret;
             }
+            if (s->basefile) {
+                uint8_t *buf1 = NULL;
+
+                assert(s->target_has_backing);
+
+                buf1 = blk_blockalign(s->target, s->buf_sectors * BDRV_SECTOR_SIZE);
+                ret = convert_co_read_from_basefile(s, sector_num, n, buf1);
+                if (ret < 0) {
+                    error_report("error while reading sector %" PRId64
+                                 ": %s from basefile", sector_num, strerror(-ret));
+                    s->ret = ret;
+                }
+                if (memcmp(buf, buf1, n * BDRV_SECTOR_SIZE) == 0) {
+                    status = BLK_ZERO;
+                }
+                qemu_vfree(buf1);
+            }
         } else if (!s->min_sparse && status == BLK_ZERO) {
             status = BLK_DATA;
             memset(buf, 0x00, n * BDRV_SECTOR_SIZE);
@@ -1933,7 +1990,8 @@ static int img_convert(int argc, char **argv)
     int c, bs_i, flags, src_flags = 0;
     const char *fmt = NULL, *out_fmt = NULL, *cache = "unsafe",
                *src_cache = BDRV_DEFAULT_CACHE, *out_baseimg = NULL,
-               *out_filename, *out_baseimg_param, *snapshot_name = NULL;
+               *out_filename, *out_baseimg_param, *snapshot_name = NULL,
+               *extentsfile = NULL, *basefile = NULL, *base_fmt="qcow2";
     BlockDriver *drv = NULL, *proto_drv = NULL;
     BlockDriverInfo bdi;
     BlockDriverState *out_bs;
@@ -1963,7 +2021,7 @@ static int img_convert(int argc, char **argv)
             {"target-image-opts", no_argument, 0, OPTION_TARGET_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, ":hf:O:B:co:s:l:S:pt:T:qnm:WU",
+        c = getopt_long(argc, argv, ":hf:O:B:co:s:l:S:pt:T:qnm:WUe:D:",
                         long_options, NULL);
         if (c == -1) {
             break;
@@ -1980,6 +2038,12 @@ static int img_convert(int argc, char **argv)
             break;
         case 'f':
             fmt = optarg;
+            break;
+        case 'e':
+            extentsfile = optarg;
+            break;
+        case 'D':
+            basefile = optarg;
             break;
         case 'O':
             out_fmt = optarg;
@@ -2239,6 +2303,16 @@ static int img_convert(int argc, char **argv)
         goto out;
     }
 
+    if (basefile && out_baseimg && strcmp(basefile, out_baseimg)) {
+        error_report("basefile and backing_file is not the same");
+        ret = -1;
+        goto out;
+    }
+
+    if (!out_baseimg && basefile) {
+        out_baseimg = strdup(basefile);
+    }
+
     /* Check if compression is supported */
     if (s.compressed) {
         bool encryption =
@@ -2272,9 +2346,15 @@ static int img_convert(int argc, char **argv)
     }
 
     if (!skip_create) {
-        /* Create the new image */
-        ret = bdrv_create(drv, out_filename, opts, &local_err);
-        if (ret < 0) {
+        if (basefile) {
+            bdrv_img_create(out_filename, "qcow2", out_baseimg, base_fmt,
+                            options, 1024 * 1024 * 1024, flags, quiet, &local_err);
+        } else {
+           /* Create the new image */
+           bdrv_create(drv, out_filename, opts, &local_err);
+        }
+
+        if (local_err < 0) {
             error_reportf_err(local_err, "%s: error while converting %s: ",
                               out_filename, out_fmt);
             goto out;
@@ -2304,6 +2384,21 @@ static int img_convert(int argc, char **argv)
         ret = -1;
         goto out;
     }
+
+    if (extentsfile) {
+        s.extentsfile = extentsfile;
+    }
+
+    if (basefile) {
+        s.basefile = img_open(image_opts, basefile, fmt,
+                              flags, writethrough, quiet, false);
+        if (!s.basefile) {
+            ret = -1;
+            goto out;
+        }
+    }
+
+
     out_bs = blk_bs(s.target);
 
     if (s.compressed && !out_bs->drv->bdrv_co_pwritev_compressed) {
