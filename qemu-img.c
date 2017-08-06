@@ -1864,7 +1864,7 @@ static void coroutine_fn convert_co_do_copy(void *opaque)
                     s->ret = ret;
                 }
                 if (memcmp(buf, buf1, n * BDRV_SECTOR_SIZE) == 0) {
-                    status = BLK_ZERO;
+                    status = BLK_BACKING_FILE;
                 }
                 qemu_vfree(buf1);
             }
@@ -1991,7 +1991,7 @@ static int img_convert(int argc, char **argv)
     const char *fmt = NULL, *out_fmt = NULL, *cache = "unsafe",
                *src_cache = BDRV_DEFAULT_CACHE, *out_baseimg = NULL,
                *out_filename, *out_baseimg_param, *snapshot_name = NULL,
-               *extentsfile = NULL, *basefile = NULL, *base_fmt="qcow2";
+               *extentsfile = NULL, *basefile = NULL, *base_fmt="raw";
     BlockDriver *drv = NULL, *proto_drv = NULL;
     BlockDriverInfo bdi;
     BlockDriverState *out_bs;
@@ -2294,7 +2294,6 @@ static int img_convert(int argc, char **argv)
     if (out_baseimg_param) {
         out_baseimg = out_baseimg_param;
     }
-    s.target_has_backing = (bool) out_baseimg;
 
     if (s.src_num > 1 && out_baseimg) {
         error_report("Having a backing file for the target makes no sense when "
@@ -2312,6 +2311,8 @@ static int img_convert(int argc, char **argv)
     if (!out_baseimg && basefile) {
         out_baseimg = strdup(basefile);
     }
+
+    s.target_has_backing = (bool) out_baseimg;
 
     /* Check if compression is supported */
     if (s.compressed) {
@@ -2347,7 +2348,7 @@ static int img_convert(int argc, char **argv)
 
     if (!skip_create) {
         if (basefile) {
-            bdrv_img_create(out_filename, "qcow2", out_baseimg, base_fmt,
+            bdrv_img_create(out_filename, out_fmt, out_baseimg, base_fmt,
                             options, 1024 * 1024 * 1024, flags, quiet, &local_err);
         } else {
            /* Create the new image */
