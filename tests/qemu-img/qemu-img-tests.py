@@ -17,11 +17,13 @@ for i in range(1000):
                "seek=%d bs=1M count=1" % random.randrange(10240))
 cmds += [
          "./qemu-img convert -f raw -O qcow2 -D /tmp/base /tmp/overlay /tmp/q1.qcow2",
+         "./qemu-img info /tmp/q1.qcow2",
          "./qemu-img convert -f qcow2 -O raw /tmp/q1.qcow2 /tmp/q1.raw",
          "stat /tmp/q1.raw",
          "cmp /tmp/q1.raw /tmp/overlay"
         ]
-print cmds
-for cmd in cmds:
-    print cmd
-    subprocess.call(cmd.split())
+
+for i in range(5):
+    for cmd in cmds:
+        print cmd
+        subprocess.call(cmd.split())
