@@ -1985,6 +1985,94 @@ static int convert_do_copy(ImgConvertState *s)
     return s->ret;
 }
 
+static gboolean str_equal_func(gconstpointer a, gconstpointer b)
+{
+    return strcmp(a, b) == 0;
+}
+
+/**
+ * Open an image file chain and return an ImageInfoList
+ *
+ * @filename: topmost image filename
+ * @fmt: topmost image format (may be NULL to autodetect)
+ * @chain: true  - enumerate entire backing file chain
+ *         false - only topmost image file
+ *
+ * Returns a list of ImageInfo objects or NULL if there was an error opening an
+ * image file.  If there was an error a message will have been printed to
+ * stderr.
+ */
+static ImageInfoList *collect_image_info_list(bool image_opts,
+                                              const char *filename,
+                                              const char *fmt,
+                                              bool chain, bool force_share)
+{
+    ImageInfoList *head = NULL;
+    ImageInfoList **last = &head;
+    GHashTable *filenames;
+    Error *err = NULL;
+
+    filenames = g_hash_table_new_full(g_str_hash, str_equal_func, NULL, NULL);
+
+    while (filename) {
+        BlockBackend *blk;
+        BlockDriverState *bs;
+        ImageInfo *info;
+        ImageInfoList *elem;
+
+        if (g_hash_table_lookup_extended(filenames, filename, NULL, NULL)) {
+            error_report("Backing file '%s' creates an infinite loop.",
+                         filename);
+            goto err;
+        }
+        g_hash_table_insert(filenames, (gpointer)filename, NULL);
+
+        blk = img_open(image_opts, filename, fmt,
+                       BDRV_O_NO_BACKING | BDRV_O_NO_IO, false, false,
+                       force_share);
+        if (!blk) {
+            goto err;
+        }
+        bs = blk_bs(blk);
+
+        bdrv_query_image_info(bs, &info, &err);
+        if (err) {
+            error_report_err(err);
+            blk_unref(blk);
+            goto err;
+        }
+
+        elem = g_new0(ImageInfoList, 1);
+        elem->value = info;
+        *last = elem;
+        last = &elem->next;
+
+        blk_unref(blk);
+
+        filename = fmt = NULL;
+        if (chain) {
+            if (info->has_full_backing_filename) {
+                filename = info->full_backing_filename;
+            } else if (info->has_backing_filename) {
+                error_report("Could not determine absolute backing filename,"
+                             " but backing filename '%s' present",
+                             info->backing_filename);
+                goto err;
+            }
+            if (info->has_backing_filename_format) {
+                fmt = info->backing_filename_format;
+            }
+        }
+    }
+    g_hash_table_destroy(filenames);
+    return head;
+
+err:
+    qapi_free_ImageInfoList(head);
+    g_hash_table_destroy(filenames);
+    return NULL;
+}
+
 static int img_convert(int argc, char **argv)
 {
     int c, bs_i, flags, src_flags = 0;
@@ -1997,6 +2085,7 @@ static int img_convert(int argc, char **argv)
     BlockDriverState *out_bs;
     QemuOpts *opts = NULL, *sn_opts = NULL;
     QemuOptsList *create_opts = NULL;
+    ImageInfoList *list;
     char *options = NULL;
     Error *local_err = NULL;
     bool writethrough, src_writethrough, quiet = false, image_opts = false,
@@ -2348,8 +2437,13 @@ static int img_convert(int argc, char **argv)
 
     if (!skip_create) {
         if (basefile) {
+            list = collect_image_info_list(image_opts, basefile, base_fmt, false,
+                                           force_share);
+            if (!list) {
+                goto out;
+            }
             bdrv_img_create(out_filename, out_fmt, out_baseimg, base_fmt,
-                            options, 1024 * 1024 * 1024, flags, quiet, &local_err);
+                            options, list->value->virtual_size, flags, quiet, &local_err);
         } else {
            /* Create the new image */
            bdrv_create(drv, out_filename, opts, &local_err);
@@ -2530,94 +2624,6 @@ static void dump_human_image_info_list(ImageInfoList *list)
 
         bdrv_image_info_dump(fprintf, stdout, elem->value);
     }
-}
-
-static gboolean str_equal_func(gconstpointer a, gconstpointer b)
-{
-    return strcmp(a, b) == 0;
-}
-
-/**
- * Open an image file chain and return an ImageInfoList
- *
- * @filename: topmost image filename
- * @fmt: topmost image format (may be NULL to autodetect)
- * @chain: true  - enumerate entire backing file chain
- *         false - only topmost image file
- *
- * Returns a list of ImageInfo objects or NULL if there was an error opening an
- * image file.  If there was an error a message will have been printed to
- * stderr.
- */
-static ImageInfoList *collect_image_info_list(bool image_opts,
-                                              const char *filename,
-                                              const char *fmt,
-                                              bool chain, bool force_share)
-{
-    ImageInfoList *head = NULL;
-    ImageInfoList **last = &head;
-    GHashTable *filenames;
-    Error *err = NULL;
-
-    filenames = g_hash_table_new_full(g_str_hash, str_equal_func, NULL, NULL);
-
-    while (filename) {
-        BlockBackend *blk;
-        BlockDriverState *bs;
-        ImageInfo *info;
-        ImageInfoList *elem;
-
-        if (g_hash_table_lookup_extended(filenames, filename, NULL, NULL)) {
-            error_report("Backing file '%s' creates an infinite loop.",
-                         filename);
-            goto err;
-        }
-        g_hash_table_insert(filenames, (gpointer)filename, NULL);
-
-        blk = img_open(image_opts, filename, fmt,
-                       BDRV_O_NO_BACKING | BDRV_O_NO_IO, false, false,
-                       force_share);
-        if (!blk) {
-            goto err;
-        }
-        bs = blk_bs(blk);
-
-        bdrv_query_image_info(bs, &info, &err);
-        if (err) {
-            error_report_err(err);
-            blk_unref(blk);
-            goto err;
-        }
-
-        elem = g_new0(ImageInfoList, 1);
-        elem->value = info;
-        *last = elem;
-        last = &elem->next;
-
-        blk_unref(blk);
-
-        filename = fmt = NULL;
-        if (chain) {
-            if (info->has_full_backing_filename) {
-                filename = info->full_backing_filename;
-            } else if (info->has_backing_filename) {
-                error_report("Could not determine absolute backing filename,"
-                             " but backing filename '%s' present",
-                             info->backing_filename);
-                goto err;
-            }
-            if (info->has_backing_filename_format) {
-                fmt = info->backing_filename_format;
-            }
-        }
-    }
-    g_hash_table_destroy(filenames);
-    return head;
-
-err:
-    qapi_free_ImageInfoList(head);
-    g_hash_table_destroy(filenames);
-    return NULL;
 }
 
 static int img_info(int argc, char **argv)
