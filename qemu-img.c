@@ -54,6 +54,12 @@ typedef struct img_cmd_t {
     int (*handler)(int argc, char **argv);
 } img_cmd_t;
 
+typedef struct _linked_list {
+   struct _linked_list *next;
+   size_t offset;
+   size_t length;
+} extent_t;
+
 enum {
     OPTION_OUTPUT = 256,
     OPTION_BACKING_CHAIN = 257,
@@ -1575,6 +1581,9 @@ typedef struct ImgConvertState {
     CoMutex lock;
     int ret;
     const char *extentsfile;
+   
+    extent_t extents;
+    extent_t *start_extent;
     BlockBackend *basefile;
 } ImgConvertState;
 
@@ -1793,6 +1802,53 @@ static int coroutine_fn convert_co_write(ImgConvertState *s, int64_t sector_num,
     return 0;
 }
 
+static bool does_sector_range_overlap_with_extent(extent_t **curr_ext,
+                                                  int64_t *sector_begin, int *n)
+{
+    int64_t qemu_offset = *sector_begin * BDRV_SECTOR_SIZE;
+    int64_t qemu_end = qemu_offset + *n * BDRV_SECTOR_SIZE - 1;
+    int64_t qemu_length = *n * BDRV_SECTOR_SIZE;
+    extent_t *deref = *curr_ext;
+
+    if (qemu_offset < deref->offset && qemu_end < deref->offset) {
+        // qemu extent is completely before the current extent
+        *sector_begin = deref->offset / BDRV_SECTOR_SIZE;
+        return false;
+    } else if (qemu_offset <= deref->offset && qemu_end < deref->offset + deref->length) {
+        // qemu extent has some overlap with current extent
+        *sector_begin = deref->offset / BDRV_SECTOR_SIZE;
+        *n = (qemu_offset + qemu_length - deref->offset )/BDRV_SECTOR_SIZE;
+        return true;
+    } else if (qemu_offset >= deref->offset && qemu_end < deref->offset + deref->length) {
+        // qemu extent is entirely within extent
+        return true;
+    } else if (qemu_offset >= deref->offset + deref->length) {
+        // qemu offset is outside of extent. Move the current extent
+        *curr_ext = deref->next;
+        if (*curr_ext) {
+            *sector_begin = (*curr_ext)->offset / BDRV_SECTOR_SIZE;
+        }
+        *n = 0;
+        return true;
+    } else if (qemu_offset >= deref->offset &&
+               qemu_offset < deref->offset + deref->length &&
+               qemu_end > (deref->offset + deref->length)) {
+        // qemu extent overlaps but extends beyond extent
+        *n = (deref->offset + deref->length - qemu_offset) / BDRV_SECTOR_SIZE;
+        *curr_ext = deref->next;
+        return true;
+    } else if (qemu_offset <= deref->offset  &&
+               qemu_offset + qemu_length >= deref->offset + deref->length) {
+        // qemu extent is super set of extent
+        *sector_begin = deref->offset / BDRV_SECTOR_SIZE;
+        *n = deref->length / BDRV_SECTOR_SIZE;
+        *curr_ext = deref->next;
+        return true;
+    }
+    // we did not cover a case.
+    assert(0);
+}
+
 static void coroutine_fn convert_co_do_copy(void *opaque)
 {
     ImgConvertState *s = opaque;
@@ -1833,9 +1889,58 @@ static void coroutine_fn convert_co_do_copy(void *opaque)
         if (!s->min_sparse && s->status == BLK_ZERO) {
             n = MIN(n, s->buf_sectors);
         }
+  
+        printf("Original: %zd, %d\n", sector_num, n);
+        // skip sectors that are not in extentions
+        if (s->extentsfile)
+        {
+            while (true)
+            {
+                while (s->start_extent && !does_sector_range_overlap_with_extent(&s->start_extent, &sector_num, &n))
+                    ;
+ 
+                if (sector_num >= s->total_sectors || s->start_extent == NULL)
+                {
+                    s->sector_num = s->total_sectors;
+                    sector_num = s->total_sectors;
+                    break;
+                }
+
+                if (n == 0)
+                {
+                    n = convert_iteration_sectors(s, sector_num);
+                    if (n < 0) {
+                        break;
+                    }
+                    /* save current sector and allocation status to local variables */
+                    status = s->status;
+                    if (!s->min_sparse && s->status == BLK_ZERO) {
+                        n = MIN(n, s->buf_sectors);
+                    }
+                } else
+                {
+                    break;
+                }
+            }
+        }
+
+        if (n < 0) 
+        {
+            qemu_co_mutex_unlock(&s->lock);
+            s->ret = n;
+            break;
+        }
+
+        if (sector_num >= s->total_sectors) 
+        {
+            qemu_co_mutex_unlock(&s->lock);
+            break;
+        }
+
         /* increment global sector counter so that other coroutines can
          * already continue reading beyond this request */
-        s->sector_num += n;
+        printf("Translated: %zd, %d\n", sector_num, n);
+        s->sector_num = sector_num + n;
         qemu_co_mutex_unlock(&s->lock);
 
         if (status == BLK_DATA || (!s->min_sparse && status == BLK_ZERO)) {
@@ -1851,7 +1956,7 @@ static void coroutine_fn convert_co_do_copy(void *opaque)
                              ": %s", sector_num, strerror(-ret));
                 s->ret = ret;
             }
-            if (s->basefile) {
+            if (s->basefile && !s->extentsfile) {
                 uint8_t *buf1 = NULL;
 
                 assert(s->target_has_backing);
@@ -1886,7 +1991,7 @@ static void coroutine_fn convert_co_do_copy(void *opaque)
             ret = convert_co_write(s, sector_num, n, buf, status);
             if (ret < 0) {
                 error_report("error while writing sector %" PRId64
-                             ": %s", sector_num, strerror(-ret));
+                             " %d" ": %s", sector_num, n, strerror(-ret));
                 s->ret = ret;
             }
         }
@@ -1961,6 +2066,7 @@ static int convert_do_copy(ImgConvertState *s)
 
     /* Do the copy */
     s->sector_next_status = 0;
+    s->start_extent = s->extents.next;
     s->ret = -EINPROGRESS;
 
     qemu_co_mutex_init(&s->lock);
@@ -2110,7 +2216,7 @@ static int img_convert(int argc, char **argv)
             {"target-image-opts", no_argument, 0, OPTION_TARGET_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, ":hf:O:B:co:s:l:S:pt:T:qnm:WUe:D:",
+        c = getopt_long(argc, argv, ":hf:O:B:co:s:l:S:pt:T:qnm:WUE:D:",
                         long_options, NULL);
         if (c == -1) {
             break;
@@ -2128,7 +2234,7 @@ static int img_convert(int argc, char **argv)
         case 'f':
             fmt = optarg;
             break;
-        case 'e':
+        case 'E':
             extentsfile = optarg;
             break;
         case 'D':
@@ -2481,7 +2587,46 @@ static int img_convert(int argc, char **argv)
     }
 
     if (extentsfile) {
+        FILE *fp;
+        char col1[128], col2[128], col3[128];
+        extent_t *last = NULL;
+
         s.extentsfile = extentsfile;
+        fp = fopen(extentsfile, "r");
+
+        // Check if file exists
+        if (fp == NULL)
+        {
+            printf("Could not open file %s", extentsfile);
+            goto out;
+        }
+        //                                                        
+        //
+        if (fscanf(fp, "%s %s %s\n", col1, col2, col3) != 3) {
+            printf("extents file '%s' is not in correct format", extentsfile);
+            goto out;
+        }
+
+        last = &s.extents;
+        last->next = NULL;
+        while(!feof(fp)) {
+           size_t offset, length;
+           extent_t *ext = NULL;
+
+           if (fscanf(fp, "%zd %zd %s\n", &offset, &length, col1) != 3) {
+                printf("extents file '%s' is not in correct format", extentsfile);
+                goto out;
+           }
+           ext = calloc(1, sizeof(extent_t));
+           ext->offset = offset;
+           ext->length = length;
+           ext->next = NULL;
+           last->next = ext;
+           last = ext;
+        }
+        //                                                                                 
+        // Close the file
+        fclose(fp);
     }
 
     if (basefile) {

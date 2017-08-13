@@ -14,7 +14,8 @@ typedef struct _linked_list {
    int length;
 } extent_t;
 
-bool does_sector_range_overlap_with_extent(extent_t **curr_ext, size_t *sector_begin, size_t *n)
+bool does_sector_range_overlap_with_extent(extent_t **curr_ext,
+                                           size_t *sector_begin, size_t *n)
 {
     size_t qemu_offset = *sector_begin * BDRV_SECTOR_SIZE;
     size_t qemu_end = qemu_offset + *n * BDRV_SECTOR_SIZE - 1;
@@ -48,7 +49,8 @@ bool does_sector_range_overlap_with_extent(extent_t **curr_ext, size_t *sector_b
         *n = (deref->offset + deref->length - qemu_offset) / BDRV_SECTOR_SIZE;
         *curr_ext = deref->next;
         return true;
-    } else if (qemu_offset <= deref->offset  && qemu_offset + qemu_length >= deref->offset + deref->length) {
+    } else if (qemu_offset <= deref->offset  &&
+               qemu_offset + qemu_length >= deref->offset + deref->length) {
         // qemu extent is super set of extent
         *sector_begin = deref->offset / BDRV_SECTOR_SIZE;
         *n = deref->length / BDRV_SECTOR_SIZE;
@@ -64,7 +66,7 @@ int main()
 {
     FILE *fp;
     int count = 0;  // Line counter (result)
-    const char *filename = "extents";
+    const char *filename = "extents.bld";
     char col1[128], col2[128], col3[128];
     char c;  // To store a character read from file
     extent_t *extents = NULL, *last = NULL, *next = NULL, *start_extent = NULL;
@@ -82,11 +84,12 @@ int main()
     //
     fscanf(fp, "%s %s %s\n", col1, col2, col3);
     last = extents = calloc(1, sizeof(extent_t));
-    while(!feof(fp)) {
+    while(!feof(fp))
+    {
        size_t offset, length;
        extent_t *ext = NULL;
 
-       fscanf(fp, "%d %d %s\n", &offset, &length, col1);
+       fscanf(fp, "%zd %zd %s\n", &offset, &length, col1);
        ext = calloc(1, sizeof(extent_t));
        ext->offset = offset;
        ext->length = length;
@@ -100,7 +103,8 @@ int main()
 
     last = extents->next;
     tb_to_backup = 0;
-    while (last) {
+    while (last)
+    {
        printf("%d %d\n", last->offset, last->length);
        tb_to_backup += last->length;
        last = last->next;
@@ -108,25 +112,38 @@ int main()
     printf("Total bytes to backup %d\n", tb_to_backup);
     printf("==============\n");
 
-    total_sectors = 1024 * 1024 * 1024/512;
-    range = 512;
-    n = 512;
+    total_sectors = 1024 * 1024 * 1024/BDRV_SECTOR_SIZE;
+    range = 4096;
+    n = 4096;
     start_sector = 0;
     start_extent = extents->next;
     tb_to_backup = 0;
-    while (start_sector < total_sectors && start_extent) {
-        while (!does_sector_range_overlap_with_extent(&start_extent, &start_sector, &n))
-            ;
-        printf("%d, %d\n", start_sector * 512, n * 512);
+    while (start_sector < total_sectors && start_extent)
+    {
+        while (true)
+        {
+            while (!does_sector_range_overlap_with_extent(&start_extent, &start_sector, &n))
+                ;
+            if (n == 0 && start_extent)
+            {
+                n = range;
+            }
+            else 
+            {
+                break;
+            }
+        }
+        printf("%d, %d\n", start_sector * BDRV_SECTOR_SIZE, n * BDRV_SECTOR_SIZE);
         start_sector += n;
-        tb_to_backup += n * 512;
+        tb_to_backup += n * BDRV_SECTOR_SIZE;
         n = range;
     }
 
     printf("Total bytes to backup %d\n", tb_to_backup);
     // free the list
     last = extents->next;
-    while (last) {
+    while (last)
+    {
        next = last->next;
        free(last);
        last = next;
