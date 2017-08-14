@@ -1890,21 +1890,21 @@ static void coroutine_fn convert_co_do_copy(void *opaque)
             n = MIN(n, s->buf_sectors);
         }
   
-        printf("Original: %zd, %d\n", sector_num, n);
         // skip sectors that are not in extentions
         if (s->extentsfile)
         {
+            printf("Original: %zd, %d\n", sector_num, n);
             while (true)
             {
-                while (s->start_extent && !does_sector_range_overlap_with_extent(&s->start_extent, &sector_num, &n))
-                    ;
- 
                 if (sector_num >= s->total_sectors || s->start_extent == NULL)
                 {
                     s->sector_num = s->total_sectors;
                     sector_num = s->total_sectors;
                     break;
                 }
+
+                while (!does_sector_range_overlap_with_extent(&s->start_extent, &sector_num, &n))
+                    ;
 
                 if (n == 0)
                 {
@@ -1919,6 +1919,7 @@ static void coroutine_fn convert_co_do_copy(void *opaque)
                     }
                 } else
                 {
+                    printf("Translated: %zd, %d\n", sector_num, n);
                     break;
                 }
             }
@@ -1939,7 +1940,6 @@ static void coroutine_fn convert_co_do_copy(void *opaque)
 
         /* increment global sector counter so that other coroutines can
          * already continue reading beyond this request */
-        printf("Translated: %zd, %d\n", sector_num, n);
         s->sector_num = sector_num + n;
         qemu_co_mutex_unlock(&s->lock);
 
