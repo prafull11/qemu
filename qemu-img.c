@@ -1893,7 +1893,7 @@ static void coroutine_fn convert_co_do_copy(void *opaque)
         // skip sectors that are not in extentions
         if (s->extentsfile)
         {
-            printf("Original: %zd, %d\n", sector_num, n);
+            //printf("Original: %zd, %d\n", sector_num, n);
             while (true)
             {
                 if (sector_num >= s->total_sectors || s->start_extent == NULL)
@@ -1919,7 +1919,7 @@ static void coroutine_fn convert_co_do_copy(void *opaque)
                     }
                 } else
                 {
-                    printf("Translated: %zd, %d\n", sector_num, n);
+                    //printf("Translated: %zd, %d\n", sector_num, n);
                     break;
                 }
             }
@@ -2185,7 +2185,7 @@ static int img_convert(int argc, char **argv)
     const char *fmt = NULL, *out_fmt = NULL, *cache = "unsafe",
                *src_cache = BDRV_DEFAULT_CACHE, *out_baseimg = NULL,
                *out_filename, *out_baseimg_param, *snapshot_name = NULL,
-               *extentsfile = NULL, *basefile = NULL, *base_fmt="raw";
+               *extentsfile = NULL, *basefile = NULL, *base_fmt="qcow2";
     BlockDriver *drv = NULL, *proto_drv = NULL;
     BlockDriverInfo bdi;
     BlockDriverState *out_bs;
