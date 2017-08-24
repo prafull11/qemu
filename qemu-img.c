@@ -2181,11 +2181,11 @@ err:
 
 static int img_convert(int argc, char **argv)
 {
-    int c, bs_i, flags, src_flags = 0;
+    int c, bs_i, flags = 0, src_flags = 0;
     const char *fmt = NULL, *out_fmt = NULL, *cache = "unsafe",
                *src_cache = BDRV_DEFAULT_CACHE, *out_baseimg = NULL,
                *out_filename, *out_baseimg_param, *snapshot_name = NULL,
-               *extentsfile = NULL, *basefile = NULL, *base_fmt="qcow2";
+               *extentsfile = NULL, *basefile = NULL, *base_fmt = "qcow2";
     BlockDriver *drv = NULL, *proto_drv = NULL;
     BlockDriverInfo bdi;
     BlockDriverState *out_bs;
@@ -2216,7 +2216,7 @@ static int img_convert(int argc, char **argv)
             {"target-image-opts", no_argument, 0, OPTION_TARGET_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, ":hf:O:B:co:s:l:S:pt:T:qnm:WUE:D:",
+        c = getopt_long(argc, argv, ":hf:O:B:co:s:l:S:pt:T:qnm:WUE:D:F:",
                         long_options, NULL);
         if (c == -1) {
             break;
@@ -2236,6 +2236,9 @@ static int img_convert(int argc, char **argv)
             break;
         case 'E':
             extentsfile = optarg;
+            break;
+        case 'F':
+            base_fmt = optarg;
             break;
         case 'D':
             basefile = optarg;
@@ -2541,6 +2544,7 @@ static int img_convert(int argc, char **argv)
         }
     }
 
+    flags = s.min_sparse ? (BDRV_O_RDWR | BDRV_O_UNMAP) : BDRV_O_RDWR;
     if (!skip_create) {
         if (basefile) {
             list = collect_image_info_list(image_opts, basefile, base_fmt, false,
@@ -2562,7 +2566,6 @@ static int img_convert(int argc, char **argv)
         }
     }
 
-    flags = s.min_sparse ? (BDRV_O_RDWR | BDRV_O_UNMAP) : BDRV_O_RDWR;
     ret = bdrv_parse_cache_mode(cache, &flags, &writethrough);
     if (ret < 0) {
         error_report("Invalid cache option: %s", cache);

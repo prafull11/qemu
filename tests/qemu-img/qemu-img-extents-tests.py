@@ -3,42 +3,49 @@ import os
 import random
 import subprocess
 
-paths = ['/tmp/overlay', '/tmp/base.qcow2',
-         '/tmp/overlay.qcow2', '/tmp/q1.qcow2', '/tmp/q1.raw',
-         '/tmp/extents.test']
+paths = ['/home/centos/qemu-fork/qemu/build/tmp/overlay', '/home/centos/qemu-fork/qemu/build/tmp/base.qcow2',
+         '/home/centos/qemu-fork/qemu/build/tmp/overlay.qcow2', '/home/centos/qemu-fork/qemu/build/tmp/q1.qcow2', '/home/centos/qemu-fork/qemu/build/tmp/q1.raw',
+         '/home/centos/qemu-fork/qemu/build/tmp/extents.test']
  
 def test_iteration(extents):
 
     for p in paths:
         os.path.exists(p) and os.remove(p)
 
-    cmds =  ["dd if=/dev/urandom of=/tmp/base bs=1M count=1024",
-             "cp /tmp/base /tmp/overlay",
+    cmds =  ["dd if=/dev/urandom of=/home/centos/qemu-fork/qemu/build/tmp/base bs=1M count=1024",
+             "cp /home/centos/qemu-fork/qemu/build/tmp/base /home/centos/qemu-fork/qemu/build/tmp/overlay",
+             "./qemu-img convert -f raw -O qcow2 /home/centos/qemu-fork/qemu/build/tmp/base /home/centos/qemu-fork/qemu/build/tmp/base.qcow2",
+             "stat /home/centos/qemu-fork/qemu/build/tmp/base.qcow2",
+             "cp /home/centos/qemu-fork/qemu/build/tmp/base.qcow2 /home/centos/qemu-fork/qemu/build/tmp/base.qcow2.bak",
+             "./qemu-img info /home/centos/qemu-fork/qemu/build/tmp/base.qcow2",
             ]
 
     for item in extents:
-       cmds.append("dd if=/dev/urandom of=/tmp/overlay conv=nocreat,notrunc "
+       cmds.append("dd if=/dev/urandom of=/home/centos/qemu-fork/qemu/build/tmp/overlay conv=nocreat,notrunc "
                    "seek=%d bs=1 count=%d" % (item['offset'], item['length']))
 
-    with open("/tmp/extents.test", "w") as f:
+    with open("/home/centos/qemu-fork/qemu/build/tmp/extents.test", "w") as f:
         f.write('Offset   Length  Type\n')
         for item in extents:
             f.write("%d %d data\n" % (item['offset'], item['length']))
 
     cmds += [
-             "./qemu-img convert -f raw -O qcow2 -W -E /tmp/extents.test -D /tmp/base /tmp/overlay /tmp/q1.qcow2",
-             "./qemu-img info /tmp/q1.qcow2",
-             "./qemu-img convert -f qcow2 -O raw /tmp/q1.qcow2 /tmp/q1.raw",
-             "stat /tmp/q1.raw",
-             "cmp /tmp/q1.raw /tmp/overlay"
+             "stat /home/centos/qemu-fork/qemu/build/tmp/base.qcow2",
+             "./qemu-img convert -f raw -O qcow2 -W -E /home/centos/qemu-fork/qemu/build/tmp/extents.test -D /home/centos/qemu-fork/qemu/build/tmp/base.qcow2 /home/centos/qemu-fork/qemu/build/tmp/overlay /home/centos/qemu-fork/qemu/build/tmp/q1.qcow2",
+             "./qemu-img info /home/centos/qemu-fork/qemu/build/tmp/q1.qcow2",
+             "./qemu-img convert -f qcow2 -O raw /home/centos/qemu-fork/qemu/build/tmp/q1.qcow2 /home/centos/qemu-fork/qemu/build/tmp/q1.raw",
+             "stat /home/centos/qemu-fork/qemu/build/tmp/q1.raw",
             ]
 
     for cmd in cmds:
         print cmd
         subprocess.call(cmd.split())
+    print "cmp /home/centos/qemu-fork/qemu/build/tmp/q1.raw /home/centos/qemu-fork/qemu/build/tmp/overlay"
+    assert subprocess.call("cmp /home/centos/qemu-fork/qemu/build/tmp/q1.raw /home/centos/qemu-fork/qemu/build/tmp/overlay".split()) == 0
 
-for i in range(10):
+for i in range(100):
     extents = [];
+    print "Iteration: ----- %d -----" % i
     for j in range(4096 * 1024, 64 * 1024 * 1024, 4096 * 1024):
         extents.append({'offset': j,
                         'length': random.randrange(1024 * 6) * 512})
