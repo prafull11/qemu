@@ -104,3 +104,16 @@ found online via the QEMU website:
   http://qemu-project.org/Contribute/StartHere
 
 -- End
+
+
+Building QEMU
+=============
+
+SUSE
+----
+
+zypper in libglade2-devel gtk2-devel glib2-devel
+zypper in gcc
+zypper in libz1 zlib-devel
+zypper in librbd-devel
+zypper in bison flex
