@@ -2554,6 +2554,8 @@ static int img_convert(int argc, char **argv)
             }
             bdrv_img_create(out_filename, out_fmt, out_baseimg, base_fmt,
                             options, list->value->virtual_size, flags, quiet, &local_err);
+
+            qapi_free_ImageInfoList(list);
         } else {
            /* Create the new image */
            bdrv_create(drv, out_filename, opts, &local_err);
