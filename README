@@ -117,3 +117,13 @@ zypper in gcc
 zypper in libz1 zlib-devel
 zypper in librbd-devel
 zypper in bison flex
+
+Ubuntu
+------
+
+apt-get install gcc
+apt-get install pkg-config
+apt-get install zlib1g-dev
+apt-get install librbd-dev
+apt-get install autoreconf
+apt-get install libtool-bin
