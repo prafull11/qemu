@@ -128,3 +128,13 @@ yum install librbd1-devel
 
 git submodule update --init dtc
 git submodule update --init pixman
+
+Ubuntu
+------
+
+apt-get install gcc
+apt-get install pkg-config
+apt-get install zlib1g-dev
+apt-get install librbd-dev
+apt-get install autoreconf
+apt-get install libtool-bin
