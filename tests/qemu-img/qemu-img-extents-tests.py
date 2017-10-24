@@ -31,6 +31,7 @@ def test_iteration(extents):
 
     cmds += [
              "stat /home/centos/qemu-fork/qemu/build/tmp/base.qcow2",
+             "qemu-img create -f qcow2 -b /home/centos/qemu-fork/qemu/build/tmp/base.qcow2 /home/centos/qemu-fork/qemu/build/tmp/q1.qcow2",
              "./qemu-img convert -f raw -O qcow2 -W -E /home/centos/qemu-fork/qemu/build/tmp/extents.test -D /home/centos/qemu-fork/qemu/build/tmp/base.qcow2 /home/centos/qemu-fork/qemu/build/tmp/overlay /home/centos/qemu-fork/qemu/build/tmp/q1.qcow2",
              "./qemu-img info /home/centos/qemu-fork/qemu/build/tmp/q1.qcow2",
              "./qemu-img convert -f qcow2 -O raw /home/centos/qemu-fork/qemu/build/tmp/q1.qcow2 /home/centos/qemu-fork/qemu/build/tmp/q1.raw",
@@ -47,6 +48,6 @@ for i in range(100):
     extents = [];
     print "Iteration: ----- %d -----" % i
     for j in range(4096 * 1024, 64 * 1024 * 1024, 4096 * 1024):
-        extents.append({'offset': j,
-                        'length': random.randrange(1024 * 6) * 512})
+        extents.append({'offset': j + random.randrange(1024),
+                        'length': random.randrange(1024 * 1024)})
     test_iteration(extents)

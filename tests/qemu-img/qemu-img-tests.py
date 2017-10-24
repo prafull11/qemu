@@ -2,29 +2,30 @@ import os
 import random
 import subprocess
 
-paths = ['/tmp/base.raw', '/tmp/overlay.raw', '/tmp/base.qcow2',
-         '/tmp/overlay.qcow2', '/tmp/q1.qcow2', '/tmp/q1.raw']
+paths = ['/home/centos/qemu-fork/qemu/build/tmp/base.raw', '/home/centos/qemu-fork/qemu/build/tmp/overlay.raw', '/home/centos/qemu-fork/qemu/build/tmp/base.qcow2',
+         '/home/centos/qemu-fork/qemu/build/tmp/overlay.qcow2', '/home/centos/qemu-fork/qemu/build/tmp/q1.qcow2', '/home/centos/qemu-fork/qemu/build/tmp/q1.raw']
  
 for p in paths:
     os.path.exists(p) and os.remove(p)
 
-cmds =  ["dd if=/dev/urandom of=/tmp/base bs=1M count=1024",
-         "cp /tmp/base /tmp/overlay",
-         #"./qemu-img convert -f raw -O qcow2 /tmp/base /tmp/base.qcow2",
+cmds =  ["dd if=/dev/urandom of=/home/centos/qemu-fork/qemu/build/tmp/base bs=1M count=1024",
+         "cp /home/centos/qemu-fork/qemu/build/tmp/base /home/centos/qemu-fork/qemu/build/tmp/overlay",
+         #"./qemu-img convert -f raw -O qcow2 /home/centos/qemu-fork/qemu/build/tmp/base /home/centos/qemu-fork/qemu/build/tmp/base.qcow2",
         ]
 
-for i in range(1000):
-   cmds.append("dd if=/dev/urandom of=/tmp/overlay conv=nocreat,notrunc "
-               "seek=%d bs=1M count=1" % random.randrange(1024))
+for i in range(100):
+   cmds.append("dd if=/dev/urandom of=/home/centos/qemu-fork/qemu/build/tmp/overlay conv=nocreat,notrunc "
+               "seek=%d bs=1024 count=1" % random.randrange(1024))
 cmds += [
-         "./qemu-img convert -f raw -O qcow2 -D /tmp/base -F raw /tmp/overlay /tmp/q1.qcow2",
-         "./qemu-img info /tmp/q1.qcow2",
-         "./qemu-img convert -f qcow2 -O raw /tmp/q1.qcow2 /tmp/q1.raw",
-         "stat /tmp/q1.raw",
+         "./qemu-img convert -f raw -O qcow2 -D /home/centos/qemu-fork/qemu/build/tmp/base -F raw /home/centos/qemu-fork/qemu/build/tmp/overlay /home/centos/qemu-fork/qemu/build/tmp/q1.qcow2",
+         "./qemu-img info /home/centos/qemu-fork/qemu/build/tmp/q1.qcow2",
+         "./qemu-img convert -f qcow2 -O raw /home/centos/qemu-fork/qemu/build/tmp/q1.qcow2 /home/centos/qemu-fork/qemu/build/tmp/q1.raw",
+         "stat /home/centos/qemu-fork/qemu/build/tmp/q1.raw",
         ]
 
 for i in range(50):
     for cmd in cmds:
         print cmd
+        if 'qemu-img convert' in cmd:
         subprocess.call(cmd.split())
-    assert subprocess.call("cmp /tmp/q1.raw /tmp/overlay".split()) == 0
+    assert subprocess.call("cmp /home/centos/qemu-fork/qemu/build/tmp/q1.raw /home/centos/qemu-fork/qemu/build/tmp/overlay".split()) == 0
