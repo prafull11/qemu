@@ -2623,8 +2623,14 @@ static int img_convert(int argc, char **argv)
                 goto out;
            }
            ext = calloc(1, sizeof(extent_t));
-           ext->offset = offset;
+           ext->offset = (offset >> BDRV_SECTOR_BITS) << BDRV_SECTOR_BITS;
+           length += offset - ext->offset;
            ext->length = length;
+           if (length & (BDRV_SECTOR_SIZE - 1)) {
+               length = length >> BDRV_SECTOR_BITS;
+               length ++;
+               ext->length = length << BDRV_SECTOR_BITS;
+           }
            ext->next = NULL;
            last->next = ext;
            last = ext;
