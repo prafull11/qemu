@@ -2642,7 +2642,7 @@ static int img_convert(int argc, char **argv)
 
     if (basefile) {
         s.basefile = img_open(image_opts, basefile, fmt,
-                              flags, writethrough, quiet, false);
+                              0, writethrough, quiet, false);
         if (!s.basefile) {
             ret = -1;
             goto out;
