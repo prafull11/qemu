@@ -3,6 +3,7 @@
 # your home directory's ~/.gdbinit file:
 #
 #   add-auto-load-safe-path /path/to/qemu/.gdbinit
+add-auto-load-safe-path /home/centos/qemu-fork/qemu/.gdbinit
 
 # Load QEMU-specific sub-commands and settings
 source scripts/qemu-gdb.py
