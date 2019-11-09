@@ -2,10 +2,8 @@
 #define QDEV_CORE_H
 
 #include "qemu/queue.h"
-#include "qemu/option.h"
 #include "qemu/bitmap.h"
 #include "qom/object.h"
-#include "hw/irq.h"
 #include "hw/hotplug.h"
 
 enum {
@@ -30,27 +28,19 @@ typedef enum DeviceCategory {
     DEVICE_CATEGORY_MAX
 } DeviceCategory;
 
-typedef int (*qdev_initfn)(DeviceState *dev);
-typedef int (*qdev_event)(DeviceState *dev);
-typedef void (*qdev_resetfn)(DeviceState *dev);
 typedef void (*DeviceRealize)(DeviceState *dev, Error **errp);
 typedef void (*DeviceUnrealize)(DeviceState *dev, Error **errp);
+typedef void (*DeviceReset)(DeviceState *dev);
 typedef void (*BusRealize)(BusState *bus, Error **errp);
 typedef void (*BusUnrealize)(BusState *bus, Error **errp);
-
-struct VMStateDescription;
 
 /**
  * DeviceClass:
  * @props: Properties accessing state fields.
  * @realize: Callback function invoked when the #DeviceState:realized
- * property is changed to %true. The default invokes @init if not %NULL.
+ * property is changed to %true.
  * @unrealize: Callback function invoked when the #DeviceState:realized
  * property is changed to %false.
- * @init: Callback function invoked when the #DeviceState::realized property
- * is changed to %true. Deprecated, new types inheriting directly from
- * TYPE_DEVICE should use @realize instead, new leaf types should consult
- * their respective parent type.
  * @hotpluggable: indicates if #DeviceClass is hotpluggable, available
  * as readonly "hotpluggable" property of #DeviceState instance
  *
@@ -58,8 +48,9 @@ struct VMStateDescription;
  * Devices are constructed in two stages,
  * 1) object instantiation via object_initialize() and
  * 2) device realization via #DeviceState:realized property.
- * The former may not fail (it might assert or exit), the latter may return
- * error information to the caller and must be re-entrant.
+ * The former may not fail (and must not abort or exit, since it is called
+ * during device introspection already), and the latter may return error
+ * information to the caller and must be re-entrant.
  * Trivial field initializations should go into #TypeInfo.instance_init.
  * Operations depending on @props static properties should go into @realize.
  * After successful realization, setting static properties will fail.
@@ -74,23 +65,32 @@ struct VMStateDescription;
  * object_initialize() in their own #TypeInfo.instance_init and forward the
  * realization events appropriately.
  *
- * The @init callback is considered private to a particular bus implementation
- * (immediate abstract child types of TYPE_DEVICE). Derived leaf types set an
- * "init" callback on their parent class instead.
- *
  * Any type may override the @realize and/or @unrealize callbacks but needs
  * to call the parent type's implementation if keeping their functionality
  * is desired. Refer to QOM documentation for further discussion and examples.
  *
  * <note>
  *   <para>
- * If a type derived directly from TYPE_DEVICE implements @realize, it does
- * not need to implement @init and therefore does not need to store and call
- * #DeviceClass' default @realize callback.
+ * Since TYPE_DEVICE doesn't implement @realize and @unrealize, types
+ * derived directly from it need not call their parent's @realize and
+ * @unrealize.
  * For other types consult the documentation and implementation of the
  * respective parent types.
  *   </para>
  * </note>
+ *
+ * # Hiding a device #
+ * To hide a device, a DeviceListener function should_be_hidden() needs to
+ * be registered.
+ * It can be used to defer adding a device and therefore hide it from the
+ * guest. The handler registering to this DeviceListener can save the QOpts
+ * passed to it for re-using it later and must return that it wants the device
+ * to be/remain hidden or not. When the handler function decides the device
+ * shall not be hidden it will be added in qdev_device_add() and
+ * realized as any other device. Otherwise qdev_device_add() will return early
+ * without adding the device. The guest will not see a "hidden" device
+ * until it was marked don't hide and qdev_device_add called again.
+ *
  */
 typedef struct DeviceClass {
     /*< private >*/
@@ -117,16 +117,14 @@ typedef struct DeviceClass {
     bool hotpluggable;
 
     /* callbacks */
-    void (*reset)(DeviceState *dev);
+    DeviceReset reset;
     DeviceRealize realize;
     DeviceUnrealize unrealize;
 
     /* device state */
-    const struct VMStateDescription *vmsd;
+    const VMStateDescription *vmsd;
 
     /* Private to qdev / bus.  */
-    qdev_initfn init; /* TODO remove, once users are converted to realize */
-    qdev_event exit; /* TODO remove, once users are converted to unrealize */
     const char *bus_type;
 } DeviceClass;
 
@@ -153,10 +151,12 @@ struct DeviceState {
     /*< public >*/
 
     const char *id;
+    char *canonical_path;
     bool realized;
     bool pending_deleted_event;
     QemuOpts *opts;
     int hotplugged;
+    bool allow_unplug_during_migration;
     BusState *parent_bus;
     QLIST_HEAD(, NamedGPIOList) gpios;
     QLIST_HEAD(, BusState) child_bus;
@@ -168,6 +168,12 @@ struct DeviceState {
 struct DeviceListener {
     void (*realize)(DeviceListener *listener, DeviceState *dev);
     void (*unrealize)(DeviceListener *listener, DeviceState *dev);
+    /*
+     * This callback is called upon init of the DeviceState and allows to
+     * inform qdev that a device should be hidden, depending on the device
+     * opts, for example, to hide a standby device.
+     */
+    int (*should_be_hidden)(DeviceListener *listener, QemuOpts *device_opts);
     QTAILQ_ENTRY(DeviceListener) link;
 };
 
@@ -208,7 +214,7 @@ typedef struct BusChild {
 
 /**
  * BusState:
- * @hotplug_device: link to a hotplug device associated with bus.
+ * @hotplug_handler: link to a hotplug handler associated with bus.
  */
 struct BusState {
     Object obj;
@@ -217,7 +223,8 @@ struct BusState {
     HotplugHandler *hotplug_handler;
     int max_index;
     bool realized;
-    QTAILQ_HEAD(ChildrenHead, BusChild) children;
+    int num_children;
+    QTAILQ_HEAD(, BusChild) children;
     QLIST_ENTRY(BusState) sibling;
 };
 
@@ -249,7 +256,7 @@ struct Property {
 struct PropertyInfo {
     const char *name;
     const char *description;
-    const char * const *enum_table;
+    const QEnumLookup *enum_table;
     int (*print)(DeviceState *dev, Property *prop, char *dest, size_t len);
     void (*set_default_value)(Object *obj, const Property *prop);
     void (*create)(Object *obj, Property *prop, Error **errp);
@@ -260,23 +267,29 @@ struct PropertyInfo {
 
 /**
  * GlobalProperty:
- * @user_provided: Set to true if property comes from user-provided config
- * (command-line or config file).
  * @used: Set to true if property was used when initializing a device.
- * @errp: Error destination, used like first argument of error_setg()
- *        in case property setting fails later. If @errp is NULL, we
- *        print warnings instead of ignoring errors silently. For
- *        hotplugged devices, errp is always ignored and warnings are
- *        printed instead.
+ * @optional: If set to true, GlobalProperty will be skipped without errors
+ *            if the property doesn't exist.
+ *
+ * An error is fatal for non-hotplugged devices, when the global is applied.
  */
 typedef struct GlobalProperty {
     const char *driver;
     const char *property;
     const char *value;
-    bool user_provided;
     bool used;
-    Error **errp;
+    bool optional;
 } GlobalProperty;
+
+static inline void
+compat_props_add(GPtrArray *arr,
+                 GlobalProperty props[], size_t nelem)
+{
+    int i;
+    for (i = 0; i < nelem; i++) {
+        g_ptr_array_add(arr, (void *)&props[i]);
+    }
+}
 
 /*** Board API.  This should go away once we have a machine config file.  ***/
 
@@ -285,6 +298,20 @@ DeviceState *qdev_try_create(BusState *bus, const char *name);
 void qdev_init_nofail(DeviceState *dev);
 void qdev_set_legacy_instance_id(DeviceState *dev, int alias_id,
                                  int required_for_version);
+HotplugHandler *qdev_get_bus_hotplug_handler(DeviceState *dev);
+HotplugHandler *qdev_get_machine_hotplug_handler(DeviceState *dev);
+bool qdev_hotplug_allowed(DeviceState *dev, Error **errp);
+/**
+ * qdev_get_hotplug_handler: Get handler responsible for device wiring
+ *
+ * Find HOTPLUG_HANDLER for @dev that provides [pre|un]plug callbacks for it.
+ *
+ * Note: in case @dev has a parent bus, it will be returned as handler unless
+ * machine handler overrides it.
+ *
+ * Returns: pointer to object that implements TYPE_HOTPLUG_HANDLER interface
+ *          or NULL if there aren't any.
+ */
 HotplugHandler *qdev_get_hotplug_handler(DeviceState *dev);
 void qdev_unplug(DeviceState *dev, Error **errp);
 void qdev_simple_device_unplug_cb(HotplugHandler *hotplug_dev,
@@ -310,10 +337,36 @@ BusState *qdev_get_child_bus(DeviceState *dev, const char *name);
 /* GPIO inputs also double as IRQ sinks.  */
 void qdev_init_gpio_in(DeviceState *dev, qemu_irq_handler handler, int n);
 void qdev_init_gpio_out(DeviceState *dev, qemu_irq *pins, int n);
-void qdev_init_gpio_in_named(DeviceState *dev, qemu_irq_handler handler,
-                             const char *name, int n);
 void qdev_init_gpio_out_named(DeviceState *dev, qemu_irq *pins,
                               const char *name, int n);
+/**
+ * qdev_init_gpio_in_named_with_opaque: create an array of input GPIO lines
+ *   for the specified device
+ *
+ * @dev: Device to create input GPIOs for
+ * @handler: Function to call when GPIO line value is set
+ * @opaque: Opaque data pointer to pass to @handler
+ * @name: Name of the GPIO input (must be unique for this device)
+ * @n: Number of GPIO lines in this input set
+ */
+void qdev_init_gpio_in_named_with_opaque(DeviceState *dev,
+                                         qemu_irq_handler handler,
+                                         void *opaque,
+                                         const char *name, int n);
+
+/**
+ * qdev_init_gpio_in_named: create an array of input GPIO lines
+ *   for the specified device
+ *
+ * Like qdev_init_gpio_in_named_with_opaque(), but the opaque pointer
+ * passed to the handler is @dev (which is the most commonly desired behaviour).
+ */
+static inline void qdev_init_gpio_in_named(DeviceState *dev,
+                                           qemu_irq_handler handler,
+                                           const char *name, int n)
+{
+    qdev_init_gpio_in_named_with_opaque(dev, handler, dev, name, n);
+}
 
 void qdev_pass_gpios(DeviceState *dev, DeviceState *container,
                      const char *name);
@@ -380,7 +433,17 @@ void qdev_machine_init(void);
  */
 void device_reset(DeviceState *dev);
 
-const struct VMStateDescription *qdev_get_vmsd(DeviceState *dev);
+void device_class_set_parent_reset(DeviceClass *dc,
+                                   DeviceReset dev_reset,
+                                   DeviceReset *parent_reset);
+void device_class_set_parent_realize(DeviceClass *dc,
+                                     DeviceRealize dev_realize,
+                                     DeviceRealize *parent_realize);
+void device_class_set_parent_unrealize(DeviceClass *dc,
+                                       DeviceUnrealize dev_unrealize,
+                                       DeviceUnrealize *parent_unrealize);
+
+const VMStateDescription *qdev_get_vmsd(DeviceState *dev);
 
 const char *qdev_fw_name(DeviceState *dev);
 
@@ -396,8 +459,7 @@ char *qdev_get_dev_path(DeviceState *dev);
 
 GSList *qdev_build_hotpluggable_device_list(Object *peripheral);
 
-void qbus_set_hotplug_handler(BusState *bus, DeviceState *handler,
-                              Error **errp);
+void qbus_set_hotplug_handler(BusState *bus, Object *handler, Error **errp);
 
 void qbus_set_bus_hotplug_handler(BusState *bus, Error **errp);
 
@@ -408,5 +470,15 @@ static inline bool qbus_is_hotpluggable(BusState *bus)
 
 void device_listener_register(DeviceListener *listener);
 void device_listener_unregister(DeviceListener *listener);
+
+/**
+ * @qdev_should_hide_device:
+ * @opts: QemuOpts as passed on cmdline.
+ *
+ * Check if a device should be added.
+ * When a device is added via qdev_device_add() this will be called,
+ * and return if the device should be added now or not.
+ */
+bool qdev_should_hide_device(QemuOpts *opts);
 
 #endif

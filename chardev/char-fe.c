@@ -24,7 +24,7 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
-#include "qapi-visit.h"
+#include "qapi/qmp/qerror.h"
 #include "sysemu/replay.h"
 
 #include "chardev/char-fe.h"
@@ -56,7 +56,7 @@ int qemu_chr_fe_write_all(CharBackend *be, const uint8_t *buf, int len)
 int qemu_chr_fe_read_all(CharBackend *be, uint8_t *buf, int len)
 {
     Chardev *s = be->chr;
-    int offset = 0, counter = 10;
+    int offset = 0;
     int res;
 
     if (!s || !CHARDEV_GET_CLASS(s)->chr_sync_read) {
@@ -88,10 +88,6 @@ int qemu_chr_fe_read_all(CharBackend *be, uint8_t *buf, int len)
         }
 
         offset += res;
-
-        if (!counter--) {
-            break;
-        }
     }
 
     if (qemu_chr_replay(s) && replay_mode == REPLAY_MODE_RECORD) {
@@ -198,19 +194,21 @@ bool qemu_chr_fe_init(CharBackend *b, Chardev *s, Error **errp)
 {
     int tag = 0;
 
-    if (CHARDEV_IS_MUX(s)) {
-        MuxChardev *d = MUX_CHARDEV(s);
+    if (s) {
+        if (CHARDEV_IS_MUX(s)) {
+            MuxChardev *d = MUX_CHARDEV(s);
 
-        if (d->mux_cnt >= MAX_MUX) {
+            if (d->mux_cnt >= MAX_MUX) {
+                goto unavailable;
+            }
+
+            d->backends[d->mux_cnt] = b;
+            tag = d->mux_cnt++;
+        } else if (s->be) {
             goto unavailable;
+        } else {
+            s->be = b;
         }
-
-        d->backends[d->mux_cnt] = b;
-        tag = d->mux_cnt++;
-    } else if (s->be) {
-        goto unavailable;
-    } else {
-        s->be = b;
     }
 
     b->fe_open = false;
@@ -237,9 +235,60 @@ void qemu_chr_fe_deinit(CharBackend *b, bool del)
             d->backends[b->tag] = NULL;
         }
         if (del) {
-            object_unparent(OBJECT(b->chr));
+            Object *obj = OBJECT(b->chr);
+            if (obj->parent) {
+                object_unparent(obj);
+            } else {
+                object_unref(obj);
+            }
         }
         b->chr = NULL;
+    }
+}
+
+void qemu_chr_fe_set_handlers_full(CharBackend *b,
+                                   IOCanReadHandler *fd_can_read,
+                                   IOReadHandler *fd_read,
+                                   IOEventHandler *fd_event,
+                                   BackendChangeHandler *be_change,
+                                   void *opaque,
+                                   GMainContext *context,
+                                   bool set_open,
+                                   bool sync_state)
+{
+    Chardev *s;
+    int fe_open;
+
+    s = b->chr;
+    if (!s) {
+        return;
+    }
+
+    if (!opaque && !fd_can_read && !fd_read && !fd_event) {
+        fe_open = 0;
+        remove_fd_in_watch(s);
+    } else {
+        fe_open = 1;
+    }
+    b->chr_can_read = fd_can_read;
+    b->chr_read = fd_read;
+    b->chr_event = fd_event;
+    b->chr_be_change = be_change;
+    b->opaque = opaque;
+
+    qemu_chr_be_update_read_handlers(s, context);
+
+    if (set_open) {
+        qemu_chr_fe_set_open(b, fe_open);
+    }
+
+    if (fe_open) {
+        qemu_chr_fe_take_focus(b);
+        /* We're connecting to an already opened device, so let's make sure we
+           also get the open event */
+        if (sync_state && s->be_open) {
+            qemu_chr_be_event(s, CHR_EVENT_OPENED);
+        }
     }
 }
 
@@ -252,47 +301,9 @@ void qemu_chr_fe_set_handlers(CharBackend *b,
                               GMainContext *context,
                               bool set_open)
 {
-    Chardev *s;
-    ChardevClass *cc;
-    int fe_open;
-
-    s = b->chr;
-    if (!s) {
-        return;
-    }
-
-    cc = CHARDEV_GET_CLASS(s);
-    if (!opaque && !fd_can_read && !fd_read && !fd_event) {
-        fe_open = 0;
-        remove_fd_in_watch(s);
-    } else {
-        fe_open = 1;
-    }
-    b->chr_can_read = fd_can_read;
-    b->chr_read = fd_read;
-    b->chr_event = fd_event;
-    b->chr_be_change = be_change;
-    b->opaque = opaque;
-    if (cc->chr_update_read_handler) {
-        cc->chr_update_read_handler(s, context);
-    }
-
-    if (set_open) {
-        qemu_chr_fe_set_open(b, fe_open);
-    }
-
-    if (fe_open) {
-        qemu_chr_fe_take_focus(b);
-        /* We're connecting to an already opened device, so let's make sure we
-           also get the open event */
-        if (s->be_open) {
-            qemu_chr_be_event(s, CHR_EVENT_OPENED);
-        }
-    }
-
-    if (CHARDEV_IS_MUX(s)) {
-        mux_chr_set_handlers(s, context);
-    }
+    qemu_chr_fe_set_handlers_full(b, fd_can_read, fd_read, fd_event, be_change,
+                                  opaque, context, set_open,
+                                  true);
 }
 
 void qemu_chr_fe_take_focus(CharBackend *b)
@@ -359,7 +370,7 @@ guint qemu_chr_fe_add_watch(CharBackend *be, GIOCondition cond,
     }
 
     g_source_set_callback(src, (GSourceFunc)func, user_data, NULL);
-    tag = g_source_attach(src, NULL);
+    tag = g_source_attach(src, s->gcontext);
     g_source_unref(src);
 
     return tag;

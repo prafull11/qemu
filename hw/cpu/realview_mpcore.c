@@ -10,8 +10,11 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qemu/module.h"
 #include "hw/cpu/arm11mpcore.h"
 #include "hw/intc/realview_gic.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 
 #define TYPE_REALVIEW_MPCORE_RIRQ "realview_mpcore"
 #define REALVIEW_MPCORE_RIRQ(obj) \
@@ -101,14 +104,14 @@ static void mpcore_rirq_init(Object *obj)
     SysBusDevice *privbusdev;
     int i;
 
-    object_initialize(&s->priv, sizeof(s->priv), TYPE_ARM11MPCORE_PRIV);
-    qdev_set_parent_bus(DEVICE(&s->priv), sysbus_get_default());
+    sysbus_init_child_obj(obj, "a11priv", &s->priv, sizeof(s->priv),
+                          TYPE_ARM11MPCORE_PRIV);
     privbusdev = SYS_BUS_DEVICE(&s->priv);
     sysbus_init_mmio(sbd, sysbus_mmio_get_region(privbusdev, 0));
 
     for (i = 0; i < 4; i++) {
-        object_initialize(&s->gic[i], sizeof(s->gic[i]), TYPE_REALVIEW_GIC);
-        qdev_set_parent_bus(DEVICE(&s->gic[i]), sysbus_get_default());
+        sysbus_init_child_obj(obj, "gic[*]", &s->gic[i], sizeof(s->gic[i]),
+                              TYPE_REALVIEW_GIC);
     }
 }
 

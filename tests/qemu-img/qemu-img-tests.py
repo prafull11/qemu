@@ -2,31 +2,30 @@ import os
 import random
 import subprocess
 
+#images_path = "/var/triliovault-mounts/test1/"
+images_path = "/home/centos/qemu-merge/qemu/build/tmp"
 for mainloop in range(1):
     print "Iteration %d" % mainloop
-    paths = ['/var/triliovault-mounts/test1/base.raw', '/var/triliovault-mounts/test1/overlay.raw', '/var/triliovault-mounts/test1/base.qcow2',
-             '/var/triliovault-mounts/test1/overlay.qcow2', '/var/triliovault-mounts/test1/q1.qcow2', '/var/triliovault-mounts/test1/q1.raw']
+    paths = [os.path.join(images_path, 'base.raw'), os.path.join(images_path, 'overlay.raw'), os.path.join(images_path, 'base.qcow2'),
+             os.path.join(images_path, 'overlay.qcow2'), os.path.join(images_path, 'q1.qcow2'), os.path.join(images_path, 'q1.raw')]
  
     for p in paths:
         os.path.exists(p) and os.remove(p)
 
-    cmds =  ["dd if=/dev/urandom of=/var/triliovault-mounts/test1/base bs=1M count=1024",
-             "cp /var/triliovault-mounts/test1/base /var/triliovault-mounts/test1/overlay",
-             #"./qemu-img convert -f raw -O qcow2 /var/triliovault-mounts/test1/base /var/triliovault-mounts/test1/base.qcow2",
+    cmds =  ["dd if=/dev/urandom of=%s bs=1M count=10240" % os.path.join(images_path, 'base'),
+             "cp %s %s" % (os.path.join(images_path, 'base'), os.path.join(images_path, 'overlay')),
             ]
 
-    cmds.append("stat /var/triliovault-mounts/test1/base")
-    cmds.append("stat /var/triliovault-mounts/test1/overlay")
-    for i in range(100):
-       cmds.append("dd if=/dev/urandom of=/var/triliovault-mounts/test1/overlay conv=nocreat,notrunc "
-                   "seek=%d bs=1024 count=1" % random.randrange(1024))
-       cmds.append("stat /var/triliovault-mounts/test1/overlay")
+    cmds.append("stat %s" % os.path.join(images_path, "base"))
+    cmds.append("stat %s" % os.path.join(images_path, "overlay"))
+    for i in range(1000):
+       cmds.append("dd if=/dev/urandom of=%s conv=nocreat,notrunc seek=%d bs=1024 count=1" % (os.path.join(images_path, 'overlay'), random.randrange(10240)))
+       cmds.append("stat %s" % os.path.join(images_path, "overlay"))
     cmds += [
-             "./qemu-img convert -f raw -O qcow2 -D /var/triliovault-mounts/test1/base -F raw /var/triliovault-mounts/test1/overlay /var/triliovault-mounts/test1/q1.qcow2",
-             "./qemu-img info /var/triliovault-mounts/test1/q1.qcow2",
-             "./qemu-img convert -f qcow2 -O raw /var/triliovault-mounts/test1/q1.qcow2 /root/q1.raw",
-             "cp /root/q1.raw /var/triliovault-mounts/test1/q1.raw",
-             "stat /var/triliovault-mounts/test1/q1.raw",
+             "./qemu-img convert -f raw -O qcow2 -D %s -F raw %s %s" % (os.path.join(images_path, "base"),  os.path.join(images_path, "overlay"), os.path.join(images_path, "q1.qcow2")),
+             "./qemu-img info %s" % os.path.join(images_path, "q1.qcow2"),
+             "./qemu-img convert -f qcow2 -O raw %s %s" % (os.path.join(images_path, "q1.qcow2"), os.path.join(images_path, "q1.raw")),
+             "stat %s" % os.path.join(images_path, "q1.raw"),
             ]
 
     for i in range(1):
@@ -34,4 +33,6 @@ for mainloop in range(1):
             print cmd
             #if 'qemu-img convert' in cmd:
             subprocess.call(cmd.split())
-        assert subprocess.call("cmp /var/triliovault-mounts/test1/q1.raw /var/triliovault-mounts/test1/overlay".split()) == 0
+        cmp_command = "cmp %s %s" % (os.path.join(images_path, "q1.raw"), os.path.join(images_path, "overlay"))
+        assert subprocess.call(cmp_command.split()) == 0
+        print cmp_command

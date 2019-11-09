@@ -23,17 +23,20 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/boards.h"
 #include "sysemu/block-backend.h"
 #include "sysemu/blockdev.h"
+#include "qapi/qmp/qdict.h"
+#include "qapi/error.h"
 #include "qemu/config-file.h"
+#include "qemu/option.h"
 #include "sysemu/sysemu.h"
 #include "monitor/monitor.h"
 #include "block/block_int.h"
 
 static DriveInfo *add_init_drive(const char *optstr)
 {
+    Error *err = NULL;
     DriveInfo *dinfo;
     QemuOpts *opts;
     MachineClass *mc;
@@ -43,8 +46,9 @@ static DriveInfo *add_init_drive(const char *optstr)
         return NULL;
 
     mc = MACHINE_GET_CLASS(current_machine);
-    dinfo = drive_new(opts, mc->block_default_type);
-    if (!dinfo) {
+    dinfo = drive_new(opts, mc->block_default_type, &err);
+    if (err) {
+        error_report_err(err);
         qemu_opts_del(opts);
         return NULL;
     }
@@ -65,10 +69,6 @@ void hmp_drive_add(Monitor *mon, const QDict *qdict)
 
     dinfo = add_init_drive(opts);
     if (!dinfo) {
-        goto err;
-    }
-    if (dinfo->devaddr) {
-        monitor_printf(mon, "Parameter addr not supported\n");
         goto err;
     }
 

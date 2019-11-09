@@ -23,11 +23,13 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "qemu-common.h"
 #include "hw/mips/mips.h"
 #include "hw/mips/cpudevs.h"
 #include "hw/i386/pc.h"
+#include "hw/dma/i8257.h"
 #include "hw/char/serial.h"
+#include "hw/char/parallel.h"
 #include "hw/isa/isa.h"
 #include "hw/block/fdc.h"
 #include "sysemu/sysemu.h"
@@ -37,13 +39,16 @@
 #include "hw/scsi/esp.h"
 #include "hw/mips/bios.h"
 #include "hw/loader.h"
-#include "hw/timer/mc146818rtc.h"
+#include "hw/rtc/mc146818rtc.h"
 #include "hw/timer/i8254.h"
+#include "hw/display/vga.h"
 #include "hw/audio/pcspk.h"
-#include "sysemu/block-backend.h"
+#include "hw/input/i8042.h"
 #include "hw/sysbus.h"
 #include "exec/address-spaces.h"
 #include "sysemu/qtest.h"
+#include "sysemu/reset.h"
+#include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/help_option.h"
 
@@ -106,23 +111,32 @@ static const MemoryRegionOps dma_dummy_ops = {
 #define MAGNUM_BIOS_SIZE_MAX 0x7e000
 #define MAGNUM_BIOS_SIZE (BIOS_SIZE < MAGNUM_BIOS_SIZE_MAX ? BIOS_SIZE : MAGNUM_BIOS_SIZE_MAX)
 
-static CPUUnassignedAccess real_do_unassigned_access;
-static void mips_jazz_do_unassigned_access(CPUState *cpu, hwaddr addr,
-                                           bool is_write, bool is_exec,
-                                           int opaque, unsigned size)
+static void (*real_do_transaction_failed)(CPUState *cpu, hwaddr physaddr,
+                                          vaddr addr, unsigned size,
+                                          MMUAccessType access_type,
+                                          int mmu_idx, MemTxAttrs attrs,
+                                          MemTxResult response,
+                                          uintptr_t retaddr);
+
+static void mips_jazz_do_transaction_failed(CPUState *cs, hwaddr physaddr,
+                                            vaddr addr, unsigned size,
+                                            MMUAccessType access_type,
+                                            int mmu_idx, MemTxAttrs attrs,
+                                            MemTxResult response,
+                                            uintptr_t retaddr)
 {
-    if (!is_exec) {
+    if (access_type != MMU_INST_FETCH) {
         /* ignore invalid access (ie do not raise exception) */
         return;
     }
-    (*real_do_unassigned_access)(cpu, addr, is_write, is_exec, opaque, size);
+    (*real_do_transaction_failed)(cs, physaddr, addr, size, access_type,
+                                  mmu_idx, attrs, response, retaddr);
 }
 
 static void mips_jazz_init(MachineState *machine,
                            enum jazz_model_e jazz_model)
 {
     MemoryRegion *address_space = get_system_memory();
-    const char *cpu_model = machine->cpu_model;
     char *filename;
     int bios_size, n;
     MIPSCPU *cpu;
@@ -142,33 +156,36 @@ static void mips_jazz_init(MachineState *machine,
     ISABus *isa_bus;
     ISADevice *pit;
     DriveInfo *fds[MAX_FD];
-    qemu_irq esp_reset, dma_enable;
     MemoryRegion *ram = g_new(MemoryRegion, 1);
     MemoryRegion *bios = g_new(MemoryRegion, 1);
     MemoryRegion *bios2 = g_new(MemoryRegion, 1);
+    SysBusESPState *sysbus_esp;
+    ESPState *esp;
 
     /* init CPUs */
-    if (cpu_model == NULL) {
-        cpu_model = "R4000";
-    }
-    cpu = cpu_mips_init(cpu_model);
-    if (cpu == NULL) {
-        fprintf(stderr, "Unable to find CPU definition\n");
-        exit(1);
-    }
+    cpu = MIPS_CPU(cpu_create(machine->cpu_type));
     env = &cpu->env;
     qemu_register_reset(main_cpu_reset, cpu);
 
-    /* Chipset returns 0 in invalid reads and do not raise data exceptions.
+    /*
+     * Chipset returns 0 in invalid reads and do not raise data exceptions.
      * However, we can't simply add a global memory region to catch
-     * everything, as memory core directly call unassigned_mem_read/write
-     * on some invalid accesses, which call do_unassigned_access on the
-     * CPU, which raise an exception.
-     * Handle that case by hijacking the do_unassigned_access method on
-     * the CPU, and do not raise exceptions for data access. */
+     * everything, as this would make all accesses including instruction
+     * accesses be ignored and not raise exceptions.
+     * So instead we hijack the do_transaction_failed method on the CPU, and
+     * do not raise exceptions for data access.
+     *
+     * NOTE: this behaviour of raising exceptions for bad instruction
+     * fetches but not bad data accesses was added in commit 54e755588cf1e9
+     * to restore behaviour broken by c658b94f6e8c206, but it is not clear
+     * whether the real hardware behaves this way. It is possible that
+     * real hardware ignores bad instruction fetches as well -- if so then
+     * we could replace this hijacking of CPU methods with a simple global
+     * memory region that catches all memory accesses, as we do on Malta.
+     */
     cc = CPU_GET_CLASS(cpu);
-    real_do_unassigned_access = cc->do_unassigned_access;
-    cc->do_unassigned_access = mips_jazz_do_unassigned_access;
+    real_do_transaction_failed = cc->do_transaction_failed;
+    cc->do_transaction_failed = mips_jazz_do_transaction_failed;
 
     /* allocate RAM */
     memory_region_allocate_system_memory(ram, NULL, "mips_jazz.ram",
@@ -225,8 +242,8 @@ static void mips_jazz_init(MachineState *machine,
     /* ISA devices */
     i8259 = i8259_init(isa_bus, env->irq[4]);
     isa_bus_irqs(isa_bus, i8259);
-    DMA_init(isa_bus, 0);
-    pit = pit_init(isa_bus, 0x40, 0, NULL);
+    i8257_dma_init(isa_bus, 0);
+    pit = i8254_pit_init(isa_bus, 0x40, 0, NULL);
     pcspk_init(isa_bus, pit);
 
     /* Video card */
@@ -275,18 +292,31 @@ static void mips_jazz_init(MachineState *machine,
             sysbus_connect_irq(sysbus, 0, qdev_get_gpio_in(rc4030, 4));
             break;
         } else if (is_help_option(nd->model)) {
-            fprintf(stderr, "qemu: Supported NICs: dp83932\n");
+            error_report("Supported NICs: dp83932");
             exit(1);
         } else {
-            fprintf(stderr, "qemu: Unsupported NIC: %s\n", nd->model);
+            error_report("Unsupported NIC: %s", nd->model);
             exit(1);
         }
     }
 
     /* SCSI adapter */
-    esp_init(0x80002000, 0,
-             rc4030_dma_read, rc4030_dma_write, dmas[0],
-             qdev_get_gpio_in(rc4030, 5), &esp_reset, &dma_enable);
+    dev = qdev_create(NULL, TYPE_ESP);
+    sysbus_esp = ESP_STATE(dev);
+    esp = &sysbus_esp->esp;
+    esp->dma_memory_read = rc4030_dma_read;
+    esp->dma_memory_write = rc4030_dma_write;
+    esp->dma_opaque = dmas[0];
+    sysbus_esp->it_shift = 0;
+    /* XXX for now until rc4030 has been changed to use DMA enable signal */
+    esp->dma_enabled = 1;
+    qdev_init_nofail(dev);
+
+    sysbus = SYS_BUS_DEVICE(dev);
+    sysbus_connect_irq(sysbus, 0, qdev_get_gpio_in(rc4030, 5));
+    sysbus_mmio_map(sysbus, 0, 0x80002000);
+
+    scsi_bus_legacy_handle_cmdline(&esp->bus);
 
     /* Floppy */
     for (n = 0; n < MAX_FD; n++) {
@@ -296,7 +326,7 @@ static void mips_jazz_init(MachineState *machine,
     fdctrl_init_sysbus(qdev_get_gpio_in(rc4030, 1), -1, 0x80003000, fds);
 
     /* Real time clock */
-    rtc_init(isa_bus, 1980, NULL);
+    mc146818_rtc_init(isa_bus, 1980, NULL);
     memory_region_init_io(rtc, NULL, &rtc_ops, NULL, "rtc", 0x1000);
     memory_region_add_subregion(address_space, 0x80004000, rtc);
 
@@ -306,15 +336,15 @@ static void mips_jazz_init(MachineState *machine,
     memory_region_add_subregion(address_space, 0x80005000, i8042);
 
     /* Serial ports */
-    if (serial_hds[0]) {
+    if (serial_hd(0)) {
         serial_mm_init(address_space, 0x80006000, 0,
                        qdev_get_gpio_in(rc4030, 8), 8000000/16,
-                       serial_hds[0], DEVICE_NATIVE_ENDIAN);
+                       serial_hd(0), DEVICE_NATIVE_ENDIAN);
     }
-    if (serial_hds[1]) {
+    if (serial_hd(1)) {
         serial_mm_init(address_space, 0x80007000, 0,
                        qdev_get_gpio_in(rc4030, 9), 8000000/16,
-                       serial_hds[1], DEVICE_NATIVE_ENDIAN);
+                       serial_hd(1), DEVICE_NATIVE_ENDIAN);
     }
 
     /* Parallel port */
@@ -332,6 +362,8 @@ static void mips_jazz_init(MachineState *machine,
 
     /* LED indicator */
     sysbus_create_simple("jazz-led", 0x8000f000, NULL);
+
+    g_free(dmas);
 }
 
 static
@@ -353,6 +385,7 @@ static void mips_magnum_class_init(ObjectClass *oc, void *data)
     mc->desc = "MIPS Magnum";
     mc->init = mips_magnum_init;
     mc->block_default_type = IF_SCSI;
+    mc->default_cpu_type = MIPS_CPU_TYPE_NAME("R4000");
 }
 
 static const TypeInfo mips_magnum_type = {
@@ -368,6 +401,7 @@ static void mips_pica61_class_init(ObjectClass *oc, void *data)
     mc->desc = "Acer Pica 61";
     mc->init = mips_pica61_init;
     mc->block_default_type = IF_SCSI;
+    mc->default_cpu_type = MIPS_CPU_TYPE_NAME("R4000");
 }
 
 static const TypeInfo mips_pica61_type = {

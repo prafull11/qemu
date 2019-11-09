@@ -13,8 +13,8 @@
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
+#include "sysemu/runstate.h"
 #include "qapi/error.h"
-#include "qapi/util.h"
 #include "migration.h"
 #include "migration/global_state.h"
 #include "migration/vmstate.h"
@@ -42,7 +42,8 @@ int global_state_store(void)
 
 void global_state_store_running(void)
 {
-    const char *state = RunState_lookup[RUN_STATE_RUNNING];
+    const char *state = RunState_str(RUN_STATE_RUNNING);
+    assert(strlen(state) < sizeof(global_state.runstate));
     strncpy((char *)global_state.runstate,
            state, sizeof(global_state.runstate));
 }
@@ -89,8 +90,18 @@ static int global_state_post_load(void *opaque, int version_id)
     s->received = true;
     trace_migrate_global_state_post_load(runstate);
 
-    r = qapi_enum_parse(RunState_lookup, runstate, RUN_STATE__MAX,
-                                -1, &local_err);
+    if (strnlen((char *)s->runstate,
+                sizeof(s->runstate)) == sizeof(s->runstate)) {
+        /*
+         * This condition should never happen during migration, because
+         * all runstate names are shorter than 100 bytes (the size of
+         * s->runstate). However, a malicious stream could overflow
+         * the qapi_enum_parse() call, so we force the last character
+         * to a NUL byte.
+         */
+        s->runstate[sizeof(s->runstate) - 1] = '\0';
+    }
+    r = qapi_enum_parse(&RunState_lookup, runstate, -1, &local_err);
 
     if (r == -1) {
         if (local_err) {
@@ -103,12 +114,15 @@ static int global_state_post_load(void *opaque, int version_id)
     return 0;
 }
 
-static void global_state_pre_save(void *opaque)
+static int global_state_pre_save(void *opaque)
 {
     GlobalState *s = opaque;
 
     trace_migrate_global_state_pre_save((char *)s->runstate);
-    s->size = strlen((char *)s->runstate) + 1;
+    s->size = strnlen((char *)s->runstate, sizeof(s->runstate)) + 1;
+    assert(s->size <= sizeof(s->runstate));
+
+    return 0;
 }
 
 static const VMStateDescription vmstate_globalstate = {

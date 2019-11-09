@@ -14,7 +14,7 @@
 #include "qemu/thread.h"
 #include "qemu/atomic.h"
 #include "qemu/notify.h"
-#include "trace.h"
+#include "qemu-thread-common.h"
 
 static bool name_threads;
 
@@ -36,6 +36,18 @@ static void error_exit(int err, const char *msg)
     abort();
 }
 
+static void compute_abs_deadline(struct timespec *ts, int ms)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    ts->tv_nsec = tv.tv_usec * 1000 + (ms % 1000) * 1000000;
+    ts->tv_sec = tv.tv_sec + ms / 1000;
+    if (ts->tv_nsec >= 1000000000) {
+        ts->tv_sec++;
+        ts->tv_nsec -= 1000000000;
+    }
+}
+
 void qemu_mutex_init(QemuMutex *mutex)
 {
     int err;
@@ -43,7 +55,7 @@ void qemu_mutex_init(QemuMutex *mutex)
     err = pthread_mutex_init(&mutex->lock, NULL);
     if (err)
         error_exit(err, __func__);
-    mutex->initialized = true;
+    qemu_mutex_post_init(mutex);
 }
 
 void qemu_mutex_destroy(QemuMutex *mutex)
@@ -57,26 +69,26 @@ void qemu_mutex_destroy(QemuMutex *mutex)
         error_exit(err, __func__);
 }
 
-void qemu_mutex_lock(QemuMutex *mutex)
+void qemu_mutex_lock_impl(QemuMutex *mutex, const char *file, const int line)
 {
     int err;
 
     assert(mutex->initialized);
+    qemu_mutex_pre_lock(mutex, file, line);
     err = pthread_mutex_lock(&mutex->lock);
     if (err)
         error_exit(err, __func__);
-
-    trace_qemu_mutex_locked(mutex);
+    qemu_mutex_post_lock(mutex, file, line);
 }
 
-int qemu_mutex_trylock(QemuMutex *mutex)
+int qemu_mutex_trylock_impl(QemuMutex *mutex, const char *file, const int line)
 {
     int err;
 
     assert(mutex->initialized);
     err = pthread_mutex_trylock(&mutex->lock);
     if (err == 0) {
-        trace_qemu_mutex_locked(mutex);
+        qemu_mutex_post_lock(mutex, file, line);
         return 0;
     }
     if (err != EBUSY) {
@@ -85,12 +97,12 @@ int qemu_mutex_trylock(QemuMutex *mutex)
     return -EBUSY;
 }
 
-void qemu_mutex_unlock(QemuMutex *mutex)
+void qemu_mutex_unlock_impl(QemuMutex *mutex, const char *file, const int line)
 {
     int err;
 
     assert(mutex->initialized);
-    trace_qemu_mutex_unlocked(mutex);
+    qemu_mutex_pre_unlock(mutex, file, line);
     err = pthread_mutex_unlock(&mutex->lock);
     if (err)
         error_exit(err, __func__);
@@ -152,23 +164,40 @@ void qemu_cond_broadcast(QemuCond *cond)
         error_exit(err, __func__);
 }
 
-void qemu_cond_wait(QemuCond *cond, QemuMutex *mutex)
+void qemu_cond_wait_impl(QemuCond *cond, QemuMutex *mutex, const char *file, const int line)
 {
     int err;
 
     assert(cond->initialized);
-    trace_qemu_mutex_unlocked(mutex);
+    qemu_mutex_pre_unlock(mutex, file, line);
     err = pthread_cond_wait(&cond->cond, &mutex->lock);
-    trace_qemu_mutex_locked(mutex);
+    qemu_mutex_post_lock(mutex, file, line);
     if (err)
         error_exit(err, __func__);
+}
+
+bool qemu_cond_timedwait_impl(QemuCond *cond, QemuMutex *mutex, int ms,
+                              const char *file, const int line)
+{
+    int err;
+    struct timespec ts;
+
+    assert(cond->initialized);
+    trace_qemu_mutex_unlock(mutex, file, line);
+    compute_abs_deadline(&ts, ms);
+    err = pthread_cond_timedwait(&cond->cond, &mutex->lock, &ts);
+    trace_qemu_mutex_locked(mutex, file, line);
+    if (err && err != ETIMEDOUT) {
+        error_exit(err, __func__);
+    }
+    return err != ETIMEDOUT;
 }
 
 void qemu_sem_init(QemuSemaphore *sem, int init)
 {
     int rc;
 
-#if defined(__APPLE__) || defined(__NetBSD__)
+#ifndef CONFIG_SEM_TIMEDWAIT
     rc = pthread_mutex_init(&sem->lock, NULL);
     if (rc != 0) {
         error_exit(rc, __func__);
@@ -196,7 +225,7 @@ void qemu_sem_destroy(QemuSemaphore *sem)
 
     assert(sem->initialized);
     sem->initialized = false;
-#if defined(__APPLE__) || defined(__NetBSD__)
+#ifndef CONFIG_SEM_TIMEDWAIT
     rc = pthread_cond_destroy(&sem->cond);
     if (rc < 0) {
         error_exit(rc, __func__);
@@ -218,7 +247,7 @@ void qemu_sem_post(QemuSemaphore *sem)
     int rc;
 
     assert(sem->initialized);
-#if defined(__APPLE__) || defined(__NetBSD__)
+#ifndef CONFIG_SEM_TIMEDWAIT
     pthread_mutex_lock(&sem->lock);
     if (sem->count == UINT_MAX) {
         rc = EINVAL;
@@ -238,25 +267,13 @@ void qemu_sem_post(QemuSemaphore *sem)
 #endif
 }
 
-static void compute_abs_deadline(struct timespec *ts, int ms)
-{
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    ts->tv_nsec = tv.tv_usec * 1000 + (ms % 1000) * 1000000;
-    ts->tv_sec = tv.tv_sec + ms / 1000;
-    if (ts->tv_nsec >= 1000000000) {
-        ts->tv_sec++;
-        ts->tv_nsec -= 1000000000;
-    }
-}
-
 int qemu_sem_timedwait(QemuSemaphore *sem, int ms)
 {
     int rc;
     struct timespec ts;
 
     assert(sem->initialized);
-#if defined(__APPLE__) || defined(__NetBSD__)
+#ifndef CONFIG_SEM_TIMEDWAIT
     rc = 0;
     compute_abs_deadline(&ts, ms);
     pthread_mutex_lock(&sem->lock);
@@ -304,7 +321,7 @@ void qemu_sem_wait(QemuSemaphore *sem)
     int rc;
 
     assert(sem->initialized);
-#if defined(__APPLE__) || defined(__NetBSD__)
+#ifndef CONFIG_SEM_TIMEDWAIT
     pthread_mutex_lock(&sem->lock);
     while (sem->count == 0) {
         rc = pthread_cond_wait(&sem->cond, &sem->lock);
@@ -443,50 +460,65 @@ void qemu_event_wait(QemuEvent *ev)
     }
 }
 
-static pthread_key_t exit_key;
+static __thread NotifierList thread_exit;
 
-union NotifierThreadData {
-    void *ptr;
-    NotifierList list;
-};
-QEMU_BUILD_BUG_ON(sizeof(union NotifierThreadData) != sizeof(void *));
-
+/*
+ * Note that in this implementation you can register a thread-exit
+ * notifier for the main thread, but it will never be called.
+ * This is OK because main thread exit can only happen when the
+ * entire process is exiting, and the API allows notifiers to not
+ * be called on process exit.
+ */
 void qemu_thread_atexit_add(Notifier *notifier)
 {
-    union NotifierThreadData ntd;
-    ntd.ptr = pthread_getspecific(exit_key);
-    notifier_list_add(&ntd.list, notifier);
-    pthread_setspecific(exit_key, ntd.ptr);
+    notifier_list_add(&thread_exit, notifier);
 }
 
 void qemu_thread_atexit_remove(Notifier *notifier)
 {
-    union NotifierThreadData ntd;
-    ntd.ptr = pthread_getspecific(exit_key);
     notifier_remove(notifier);
-    pthread_setspecific(exit_key, ntd.ptr);
 }
 
-static void qemu_thread_atexit_run(void *arg)
+static void qemu_thread_atexit_notify(void *arg)
 {
-    union NotifierThreadData ntd = { .ptr = arg };
-    notifier_list_notify(&ntd.list, NULL);
+    /*
+     * Called when non-main thread exits (via qemu_thread_exit()
+     * or by returning from its start routine.)
+     */
+    notifier_list_notify(&thread_exit, NULL);
 }
 
-static void __attribute__((constructor)) qemu_thread_atexit_init(void)
-{
-    pthread_key_create(&exit_key, qemu_thread_atexit_run);
-}
+typedef struct {
+    void *(*start_routine)(void *);
+    void *arg;
+    char *name;
+} QemuThreadArgs;
 
-
-/* Attempt to set the threads name; note that this is for debug, so
- * we're not going to fail if we can't set it.
- */
-static void qemu_thread_set_name(QemuThread *thread, const char *name)
+static void *qemu_thread_start(void *args)
 {
-#ifdef CONFIG_PTHREAD_SETNAME_NP
-    pthread_setname_np(thread->thread, name);
+    QemuThreadArgs *qemu_thread_args = args;
+    void *(*start_routine)(void *) = qemu_thread_args->start_routine;
+    void *arg = qemu_thread_args->arg;
+    void *r;
+
+#ifdef CONFIG_THREAD_SETNAME_BYTHREAD
+    /* Attempt to set the threads name; note that this is for debug, so
+     * we're not going to fail if we can't set it.
+     */
+    if (name_threads && qemu_thread_args->name) {
+# if defined(CONFIG_PTHREAD_SETNAME_NP_W_TID)
+        pthread_setname_np(pthread_self(), qemu_thread_args->name);
+# elif defined(CONFIG_PTHREAD_SETNAME_NP_WO_TID)
+        pthread_setname_np(qemu_thread_args->name);
+# endif
+    }
 #endif
+    g_free(qemu_thread_args->name);
+    g_free(qemu_thread_args);
+    pthread_cleanup_push(qemu_thread_atexit_notify, NULL);
+    r = start_routine(arg);
+    pthread_cleanup_pop(1);
+    return r;
 }
 
 void qemu_thread_create(QemuThread *thread, const char *name,
@@ -496,29 +528,37 @@ void qemu_thread_create(QemuThread *thread, const char *name,
     sigset_t set, oldset;
     int err;
     pthread_attr_t attr;
+    QemuThreadArgs *qemu_thread_args;
 
     err = pthread_attr_init(&attr);
     if (err) {
         error_exit(err, __func__);
     }
 
+    if (mode == QEMU_THREAD_DETACHED) {
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    }
+
     /* Leave signal handling to the iothread.  */
     sigfillset(&set);
+    /* Blocking the signals can result in undefined behaviour. */
+    sigdelset(&set, SIGSEGV);
+    sigdelset(&set, SIGFPE);
+    sigdelset(&set, SIGILL);
+    /* TODO avoid SIGBUS loss on macOS */
     pthread_sigmask(SIG_SETMASK, &set, &oldset);
-    err = pthread_create(&thread->thread, &attr, start_routine, arg);
+
+    qemu_thread_args = g_new0(QemuThreadArgs, 1);
+    qemu_thread_args->name = g_strdup(name);
+    qemu_thread_args->start_routine = start_routine;
+    qemu_thread_args->arg = arg;
+
+    err = pthread_create(&thread->thread, &attr,
+                         qemu_thread_start, qemu_thread_args);
+
     if (err)
         error_exit(err, __func__);
 
-    if (name_threads) {
-        qemu_thread_set_name(thread, name);
-    }
-
-    if (mode == QEMU_THREAD_DETACHED) {
-        err = pthread_detach(thread->thread);
-        if (err) {
-            error_exit(err, __func__);
-        }
-    }
     pthread_sigmask(SIG_SETMASK, &oldset, NULL);
 
     pthread_attr_destroy(&attr);

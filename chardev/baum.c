@@ -1,7 +1,7 @@
 /*
  * QEMU Baum Braille Device
  *
- * Copyright (c) 2008, 2010-2011, 2016 Samuel Thibault
+ * Copyright (c) 2008, 2010-2011, 2016-2017 Samuel Thibault
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -21,10 +21,12 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "chardev/char.h"
+#include "qemu/main-loop.h"
+#include "qemu/module.h"
 #include "qemu/timer.h"
 #include "hw/usb.h"
 #include "ui/console.h"
@@ -238,6 +240,12 @@ static int baum_deferred_init(BaumChardev *baum)
     if (brlapi__getDisplaySize(baum->brlapi, &baum->x, &baum->y) == -1) {
         brlapi_perror("baum: brlapi__getDisplaySize");
         return 0;
+    }
+    if (baum->y > 1) {
+        baum->y = 1;
+    }
+    if (baum->x > 84) {
+        baum->x = 84;
     }
 
     con = qemu_console_lookup_by_index(0);
@@ -643,6 +651,7 @@ static void baum_chr_open(Chardev *chr,
         error_setg(errp, "brlapi__openConnection: %s",
                    brlapi_strerror(brlapi_error_location()));
         g_free(handle);
+        baum->brlapi = NULL;
         return;
     }
     baum->deferred_init = 0;

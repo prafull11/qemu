@@ -24,15 +24,15 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
-#include "hw/i386/pc.h"
 #include "hw/pci/pci.h"
-#include "hw/isa/isa.h"
+#include "migration/vmstate.h"
+#include "qemu/module.h"
 #include "sysemu/block-backend.h"
-#include "sysemu/sysemu.h"
+#include "sysemu/blockdev.h"
 #include "sysemu/dma.h"
 
 #include "hw/ide/pci.h"
+#include "trace.h"
 
 static uint64_t bmdma_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -54,9 +54,8 @@ static uint64_t bmdma_read(void *opaque, hwaddr addr, unsigned size)
         val = 0xff;
         break;
     }
-#ifdef DEBUG_IDE
-    printf("bmdma: readb 0x%02x : 0x%02x\n", (uint8_t)addr, val);
-#endif
+
+    trace_bmdma_read(addr, val);
     return val;
 }
 
@@ -69,9 +68,8 @@ static void bmdma_write(void *opaque, hwaddr addr,
         return;
     }
 
-#ifdef DEBUG_IDE
-    printf("bmdma: writeb 0x%02x : 0x%02x\n", (uint8_t)addr, (uint8_t)val);
-#endif
+    trace_bmdma_write(addr, val);
+
     switch(addr & 3) {
     case 0:
         bmdma_cmd_writeb(bm, val);
@@ -104,9 +102,9 @@ static void bmdma_setup_bar(PCIIDEState *d)
     }
 }
 
-static void piix3_reset(void *opaque)
+static void piix_ide_reset(DeviceState *dev)
 {
-    PCIIDEState *d = opaque;
+    PCIIDEState *d = PCI_IDE(dev);
     PCIDevice *pd = PCI_DEVICE(d);
     uint8_t *pci_conf = pd->config;
     int i;
@@ -154,8 +152,6 @@ static void pci_piix_ide_realize(PCIDevice *dev, Error **errp)
     uint8_t *pci_conf = dev->config;
 
     pci_conf[PCI_CLASS_PROG] = 0x80; // legacy ATA mode
-
-    qemu_register_reset(piix3_reset, d);
 
     bmdma_setup_bar(d);
     pci_register_bar(dev, 4, PCI_BASE_ADDRESS_SPACE_IO, &d->bmdma_bar);
@@ -248,6 +244,7 @@ static void piix3_ide_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
+    dc->reset = piix_ide_reset;
     k->realize = pci_piix_ide_realize;
     k->exit = pci_piix_ide_exitfn;
     k->vendor_id = PCI_VENDOR_ID_INTEL;
@@ -274,6 +271,7 @@ static void piix4_ide_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
+    dc->reset = piix_ide_reset;
     k->realize = pci_piix_ide_realize;
     k->exit = pci_piix_ide_exitfn;
     k->vendor_id = PCI_VENDOR_ID_INTEL;

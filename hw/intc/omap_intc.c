@@ -17,11 +17,14 @@
  * You should have received a copy of the GNU General Public License along
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
+
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "hw/arm/omap.h"
 #include "hw/sysbus.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
 #include "qapi/error.h"
 
 /* Interrupt Handlers */
@@ -540,7 +543,7 @@ static void omap2_inth_write(void *opaque, hwaddr addr,
          * for every register, see Chapter 3 and 4 for privileged mode.  */
         if (value & 1)
             fprintf(stderr, "%s: protection mode enable attempt\n",
-                            __FUNCTION__);
+                            __func__);
         return;
 
     case 0x50:	/* INTC_IDLE */

@@ -15,14 +15,12 @@
 #define QEMU_KVM_H
 
 #include "qemu/queue.h"
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
 #include "exec/memattrs.h"
-#include "hw/irq.h"
 
 #ifdef NEED_CPU_H
 # ifdef CONFIG_KVM
 #  include <linux/kvm.h>
-#  include <linux/kvm_para.h>
 #  define CONFIG_KVM_IS_POSSIBLE
 # endif
 #else
@@ -207,10 +205,11 @@ extern KVMState *kvm_state;
 /* external API */
 
 bool kvm_has_free_slot(MachineState *ms);
-int kvm_has_sync_mmu(void);
+bool kvm_has_sync_mmu(void);
 int kvm_has_vcpu_events(void);
 int kvm_has_robust_singlestep(void);
 int kvm_has_debugregs(void);
+int kvm_max_nested_state_length(void);
 int kvm_has_pit_state2(void);
 int kvm_has_many_ioeventfds(void);
 int kvm_has_gsi_routing(void);
@@ -231,6 +230,23 @@ int kvm_destroy_vcpu(CPUState *cpu);
  */
 bool kvm_arm_supports_user_irq(void);
 
+/**
+ * kvm_memcrypt_enabled - return boolean indicating whether memory encryption
+ *                        is enabled
+ * Returns: 1 memory encryption is enabled
+ *          0 memory encryption is disabled
+ */
+bool kvm_memcrypt_enabled(void);
+
+/**
+ * kvm_memcrypt_encrypt_data: encrypt the memory range
+ *
+ * Return: 1 failed to encrypt the range
+ *         0 succesfully encrypted memory region
+ */
+int kvm_memcrypt_encrypt_data(uint8_t *ptr, uint64_t len);
+
+
 #ifdef NEED_CPU_H
 #include "cpu.h"
 
@@ -248,7 +264,7 @@ int kvm_on_sigbus(int code, void *addr);
 
 /* interface with exec.c */
 
-void phys_mem_set_alloc(void *(*alloc)(size_t, uint64_t *align));
+void phys_mem_set_alloc(void *(*alloc)(size_t, uint64_t *align, bool shared));
 
 /* internal API */
 
@@ -292,7 +308,7 @@ int kvm_vm_check_attr(KVMState *s, uint32_t group, uint64_t attr);
 int kvm_device_check_attr(int fd, uint32_t group, uint64_t attr);
 
 /**
- * kvm_device_access - set or get value of a specific vm attribute
+ * kvm_device_access - set or get value of a specific device attribute
  * @fd: The device file descriptor
  * @group: the group
  * @attr: the attribute of that group to set or get
@@ -355,6 +371,7 @@ int kvm_arch_put_registers(CPUState *cpu, int level);
 int kvm_arch_init(MachineState *ms, KVMState *s);
 
 int kvm_arch_init_vcpu(CPUState *cpu);
+int kvm_arch_destroy_vcpu(CPUState *cpu);
 
 bool kvm_vcpu_id_is_valid(int vcpu_id);
 
@@ -396,8 +413,6 @@ struct kvm_sw_breakpoint {
     QTAILQ_ENTRY(kvm_sw_breakpoint) entry;
 };
 
-QTAILQ_HEAD(kvm_sw_breakpoint_head, kvm_sw_breakpoint);
-
 struct kvm_sw_breakpoint *kvm_find_sw_breakpoint(CPUState *cpu,
                                                  target_ulong pc);
 
@@ -428,11 +443,8 @@ int kvm_vm_check_extension(KVMState *s, unsigned int extension);
             .flags = cap_flags,                                      \
         };                                                           \
         uint64_t args_tmp[] = { __VA_ARGS__ };                       \
-        int i;                                                       \
-        for (i = 0; i < (int)ARRAY_SIZE(args_tmp) &&                 \
-                     i < ARRAY_SIZE(cap.args); i++) {                \
-            cap.args[i] = args_tmp[i];                               \
-        }                                                            \
+        size_t n = MIN(ARRAY_SIZE(args_tmp), ARRAY_SIZE(cap.args));  \
+        memcpy(cap.args, args_tmp, n * sizeof(cap.args[0]));         \
         kvm_vm_ioctl(s, KVM_ENABLE_CAP, &cap);                       \
     })
 
@@ -443,16 +455,15 @@ int kvm_vm_check_extension(KVMState *s, unsigned int extension);
             .flags = cap_flags,                                      \
         };                                                           \
         uint64_t args_tmp[] = { __VA_ARGS__ };                       \
-        int i;                                                       \
-        for (i = 0; i < (int)ARRAY_SIZE(args_tmp) &&                 \
-                     i < ARRAY_SIZE(cap.args); i++) {                \
-            cap.args[i] = args_tmp[i];                               \
-        }                                                            \
+        size_t n = MIN(ARRAY_SIZE(args_tmp), ARRAY_SIZE(cap.args));  \
+        memcpy(cap.args, args_tmp, n * sizeof(cap.args[0]));         \
         kvm_vcpu_ioctl(cpu, KVM_ENABLE_CAP, &cap);                   \
     })
 
 uint32_t kvm_arch_get_supported_cpuid(KVMState *env, uint32_t function,
                                       uint32_t index, int reg);
+uint64_t kvm_arch_get_supported_msr_feature(KVMState *s, uint32_t index);
+
 
 void kvm_set_sigmask_len(KVMState *s, unsigned int sigmask_len);
 

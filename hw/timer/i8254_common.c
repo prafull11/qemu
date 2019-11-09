@@ -22,13 +22,15 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
-#include "hw/hw.h"
-#include "hw/i386/pc.h"
 #include "hw/isa/isa.h"
+#include "qemu/module.h"
 #include "qemu/timer.h"
 #include "hw/timer/i8254.h"
 #include "hw/timer/i8254_internal.h"
+#include "migration/qemu-file-types.h"
+#include "migration/vmstate.h"
 
 /* val must be 0 or 1 */
 void pit_set_gate(ISADevice *dev, int channel, int val)
@@ -93,7 +95,7 @@ int64_t pit_get_next_transition_time(PITChannelState *s, int64_t current_time)
         }
         break;
     case 2:
-        base = (d / s->count) * s->count;
+        base = QEMU_ALIGN_DOWN(d, s->count);
         if ((d - base) == 0 && d != 0) {
             next_time = base + s->count;
         } else {
@@ -101,7 +103,7 @@ int64_t pit_get_next_transition_time(PITChannelState *s, int64_t current_time)
         }
         break;
     case 3:
-        base = (d / s->count) * s->count;
+        base = QEMU_ALIGN_DOWN(d, s->count);
         period2 = ((s->count + 1) >> 1);
         if ((d - base) < period2) {
             next_time = base + period2;
@@ -237,7 +239,7 @@ static int pit_load_old(QEMUFile *f, void *opaque, int version_id)
     return 0;
 }
 
-static void pit_dispatch_pre_save(void *opaque)
+static int pit_dispatch_pre_save(void *opaque)
 {
     PITCommonState *s = opaque;
     PITCommonClass *c = PIT_COMMON_GET_CLASS(s);
@@ -245,6 +247,8 @@ static void pit_dispatch_pre_save(void *opaque)
     if (c->pre_save) {
         c->pre_save(s);
     }
+
+    return 0;
 }
 
 static int pit_dispatch_post_load(void *opaque, int version_id)

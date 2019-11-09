@@ -21,16 +21,21 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "qemu-common.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/dma.h"
+#include "sysemu/reset.h"
 #include "hw/boards.h"
-#include "hw/isa/isa.h"
 #include "hw/nvram/fw_cfg.h"
+#include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
+#include "migration/qemu-file-types.h"
+#include "migration/vmstate.h"
 #include "trace.h"
 #include "qemu/error-report.h"
+#include "qemu/option.h"
 #include "qemu/config-file.h"
 #include "qemu/cutils.h"
 #include "qapi/error.h"
@@ -55,8 +60,65 @@ struct FWCfgEntry {
     bool allow_write;
     uint8_t *data;
     void *callback_opaque;
-    FWCfgReadCallback read_callback;
+    FWCfgCallback select_cb;
+    FWCfgWriteCallback write_cb;
 };
+
+/**
+ * key_name:
+ *
+ * @key: The uint16 selector key.
+ *
+ * Returns: The stringified name if the selector refers to a well-known
+ *          numerically defined item, or NULL on key lookup failure.
+ */
+static const char *key_name(uint16_t key)
+{
+    static const char *fw_cfg_wellknown_keys[FW_CFG_FILE_FIRST] = {
+        [FW_CFG_SIGNATURE] = "signature",
+        [FW_CFG_ID] = "id",
+        [FW_CFG_UUID] = "uuid",
+        [FW_CFG_RAM_SIZE] = "ram_size",
+        [FW_CFG_NOGRAPHIC] = "nographic",
+        [FW_CFG_NB_CPUS] = "nb_cpus",
+        [FW_CFG_MACHINE_ID] = "machine_id",
+        [FW_CFG_KERNEL_ADDR] = "kernel_addr",
+        [FW_CFG_KERNEL_SIZE] = "kernel_size",
+        [FW_CFG_KERNEL_CMDLINE] = "kernel_cmdline",
+        [FW_CFG_INITRD_ADDR] = "initrd_addr",
+        [FW_CFG_INITRD_SIZE] = "initdr_size",
+        [FW_CFG_BOOT_DEVICE] = "boot_device",
+        [FW_CFG_NUMA] = "numa",
+        [FW_CFG_BOOT_MENU] = "boot_menu",
+        [FW_CFG_MAX_CPUS] = "max_cpus",
+        [FW_CFG_KERNEL_ENTRY] = "kernel_entry",
+        [FW_CFG_KERNEL_DATA] = "kernel_data",
+        [FW_CFG_INITRD_DATA] = "initrd_data",
+        [FW_CFG_CMDLINE_ADDR] = "cmdline_addr",
+        [FW_CFG_CMDLINE_SIZE] = "cmdline_size",
+        [FW_CFG_CMDLINE_DATA] = "cmdline_data",
+        [FW_CFG_SETUP_ADDR] = "setup_addr",
+        [FW_CFG_SETUP_SIZE] = "setup_size",
+        [FW_CFG_SETUP_DATA] = "setup_data",
+        [FW_CFG_FILE_DIR] = "file_dir",
+    };
+
+    if (key & FW_CFG_ARCH_LOCAL) {
+        return fw_cfg_arch_key_name(key);
+    }
+    if (key < FW_CFG_FILE_FIRST) {
+        return fw_cfg_wellknown_keys[key];
+    }
+
+    return NULL;
+}
+
+static inline const char *trace_key_name(uint16_t key)
+{
+    const char *name = key_name(key);
+
+    return name ? name : "unknown";
+}
 
 #define JPG_FILE 0
 #define BMP_FILE 1
@@ -65,15 +127,14 @@ static char *read_splashfile(char *filename, gsize *file_sizep,
                              int *file_typep)
 {
     GError *err = NULL;
-    gboolean res;
     gchar *content;
     int file_type;
     unsigned int filehead;
     int bmp_bpp;
 
-    res = g_file_get_contents(filename, &content, file_sizep, &err);
-    if (res == FALSE) {
-        error_report("failed to read splash file '%s'", filename);
+    if (!g_file_get_contents(filename, &content, file_sizep, &err)) {
+        error_report("failed to read splash file '%s': %s",
+                     filename, err->message);
         g_error_free(err);
         return NULL;
     }
@@ -84,7 +145,7 @@ static char *read_splashfile(char *filename, gsize *file_sizep,
     }
 
     /* check magic ID */
-    filehead = ((content[0] & 0xff) + (content[1] << 8)) & 0xffff;
+    filehead = lduw_le_p(content);
     if (filehead == 0xd8ff) {
         file_type = JPG_FILE;
     } else if (filehead == 0x4d42) {
@@ -95,7 +156,7 @@ static char *read_splashfile(char *filename, gsize *file_sizep,
 
     /* check BMP bpp */
     if (file_type == BMP_FILE) {
-        bmp_bpp = (content[28] + (content[29] << 8)) & 0xffff;
+        bmp_bpp = lduw_le_p(&content[28]);
         if (bmp_bpp != 24) {
             goto error;
         }
@@ -115,47 +176,40 @@ error:
 
 static void fw_cfg_bootsplash(FWCfgState *s)
 {
-    int boot_splash_time = -1;
     const char *boot_splash_filename = NULL;
-    char *p;
+    const char *boot_splash_time = NULL;
     char *filename, *file_data;
     gsize file_size;
     int file_type;
-    const char *temp;
 
     /* get user configuration */
     QemuOptsList *plist = qemu_find_opts("boot-opts");
     QemuOpts *opts = QTAILQ_FIRST(&plist->head);
-    if (opts != NULL) {
-        temp = qemu_opt_get(opts, "splash");
-        if (temp != NULL) {
-            boot_splash_filename = temp;
-        }
-        temp = qemu_opt_get(opts, "splash-time");
-        if (temp != NULL) {
-            p = (char *)temp;
-            boot_splash_time = strtol(p, &p, 10);
-        }
-    }
+    boot_splash_filename = qemu_opt_get(opts, "splash");
+    boot_splash_time = qemu_opt_get(opts, "splash-time");
 
     /* insert splash time if user configurated */
-    if (boot_splash_time >= 0) {
+    if (boot_splash_time) {
+        int64_t bst_val = qemu_opt_get_number(opts, "splash-time", -1);
+        uint16_t bst_le16;
+
         /* validate the input */
-        if (boot_splash_time > 0xffff) {
-            error_report("splash time is big than 65535, force it to 65535.");
-            boot_splash_time = 0xffff;
+        if (bst_val < 0 || bst_val > 0xffff) {
+            error_report("splash-time is invalid,"
+                         "it should be a value between 0 and 65535");
+            exit(1);
         }
         /* use little endian format */
-        qemu_extra_params_fw[0] = (uint8_t)(boot_splash_time & 0xff);
-        qemu_extra_params_fw[1] = (uint8_t)((boot_splash_time >> 8) & 0xff);
-        fw_cfg_add_file(s, "etc/boot-menu-wait", qemu_extra_params_fw, 2);
+        bst_le16 = cpu_to_le16(bst_val);
+        fw_cfg_add_file(s, "etc/boot-menu-wait",
+                        g_memdup(&bst_le16, sizeof bst_le16), sizeof bst_le16);
     }
 
     /* insert splash file if user configurated */
-    if (boot_splash_filename != NULL) {
+    if (boot_splash_filename) {
         filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, boot_splash_filename);
         if (filename == NULL) {
-            error_report("failed to find file '%s'.", boot_splash_filename);
+            error_report("failed to find file '%s'", boot_splash_filename);
             return;
         }
 
@@ -167,15 +221,14 @@ static void fw_cfg_bootsplash(FWCfgState *s)
         }
         g_free(boot_splash_filedata);
         boot_splash_filedata = (uint8_t *)file_data;
-        boot_splash_filedata_size = file_size;
 
         /* insert data */
         if (file_type == JPG_FILE) {
             fw_cfg_add_file(s, "bootsplash.jpg",
-                    boot_splash_filedata, boot_splash_filedata_size);
+                            boot_splash_filedata, file_size);
         } else {
             fw_cfg_add_file(s, "bootsplash.bmp",
-                    boot_splash_filedata, boot_splash_filedata_size);
+                            boot_splash_filedata, file_size);
         }
         g_free(filename);
     }
@@ -183,26 +236,28 @@ static void fw_cfg_bootsplash(FWCfgState *s)
 
 static void fw_cfg_reboot(FWCfgState *s)
 {
-    int reboot_timeout = -1;
-    char *p;
-    const char *temp;
+    const char *reboot_timeout = NULL;
+    uint64_t rt_val = -1;
+    uint32_t rt_le32;
 
     /* get user configuration */
     QemuOptsList *plist = qemu_find_opts("boot-opts");
     QemuOpts *opts = QTAILQ_FIRST(&plist->head);
-    if (opts != NULL) {
-        temp = qemu_opt_get(opts, "reboot-timeout");
-        if (temp != NULL) {
-            p = (char *)temp;
-            reboot_timeout = strtol(p, &p, 10);
+    reboot_timeout = qemu_opt_get(opts, "reboot-timeout");
+
+    if (reboot_timeout) {
+        rt_val = qemu_opt_get_number(opts, "reboot-timeout", -1);
+
+        /* validate the input */
+        if (rt_val > 0xffff && rt_val != (uint64_t)-1) {
+            error_report("reboot timeout is invalid,"
+                         "it should be a value between -1 and 65535");
+            exit(1);
         }
     }
-    /* validate the input */
-    if (reboot_timeout > 0xffff) {
-        error_report("reboot timeout is larger than 65535, force it to 65535.");
-        reboot_timeout = 0xffff;
-    }
-    fw_cfg_add_file(s, "etc/boot-fail-wait", g_memdup(&reboot_timeout, 4), 4);
+
+    rt_le32 = cpu_to_le32(rt_val);
+    fw_cfg_add_file(s, "etc/boot-fail-wait", g_memdup(&rt_le32, 4), 4);
 }
 
 static void fw_cfg_write(FWCfgState *s, uint8_t value)
@@ -236,12 +291,12 @@ static int fw_cfg_select(FWCfgState *s, uint16_t key)
         /* entry successfully selected, now run callback if present */
         arch = !!(key & FW_CFG_ARCH_LOCAL);
         e = &s->entries[arch][key & FW_CFG_ENTRY_MASK];
-        if (e->read_callback) {
-            e->read_callback(e->callback_opaque);
+        if (e->select_cb) {
+            e->select_cb(e->callback_opaque);
         }
     }
 
-    trace_fw_cfg_select(s, key, ret);
+    trace_fw_cfg_select(s, key, trace_key_name(key), ret);
     return ret;
 }
 
@@ -370,6 +425,8 @@ static void fw_cfg_dma_transfer(FWCfgState *s)
                     dma_memory_read(s->dma_as, dma.address,
                                     &e->data[s->cur_offset], len)) {
                     dma.control |= FW_CFG_DMA_CTL_ERROR;
+                } else if (e->write_cb) {
+                    e->write_cb(e->callback_opaque, s->cur_offset, len);
                 }
             }
 
@@ -415,16 +472,23 @@ static void fw_cfg_dma_mem_write(void *opaque, hwaddr addr,
 }
 
 static bool fw_cfg_dma_mem_valid(void *opaque, hwaddr addr,
-                                  unsigned size, bool is_write)
+                                 unsigned size, bool is_write,
+                                 MemTxAttrs attrs)
 {
     return !is_write || ((size == 4 && (addr == 0 || addr == 4)) ||
                          (size == 8 && addr == 0));
 }
 
 static bool fw_cfg_data_mem_valid(void *opaque, hwaddr addr,
-                                  unsigned size, bool is_write)
+                                  unsigned size, bool is_write,
+                                  MemTxAttrs attrs)
 {
     return addr == 0;
+}
+
+static uint64_t fw_cfg_ctl_mem_read(void *opaque, hwaddr addr, unsigned size)
+{
+    return 0;
 }
 
 static void fw_cfg_ctl_mem_write(void *opaque, hwaddr addr,
@@ -434,7 +498,8 @@ static void fw_cfg_ctl_mem_write(void *opaque, hwaddr addr,
 }
 
 static bool fw_cfg_ctl_mem_valid(void *opaque, hwaddr addr,
-                                 unsigned size, bool is_write)
+                                 unsigned size, bool is_write,
+                                 MemTxAttrs attrs)
 {
     return is_write && size == 2;
 }
@@ -453,12 +518,14 @@ static void fw_cfg_comb_write(void *opaque, hwaddr addr,
 }
 
 static bool fw_cfg_comb_valid(void *opaque, hwaddr addr,
-                                  unsigned size, bool is_write)
+                              unsigned size, bool is_write,
+                              MemTxAttrs attrs)
 {
     return (size == 1) || (is_write && size == 2);
 }
 
 static const MemoryRegionOps fw_cfg_ctl_mem_ops = {
+    .read = fw_cfg_ctl_mem_read,
     .write = fw_cfg_ctl_mem_write,
     .endianness = DEVICE_BIG_ENDIAN,
     .valid.accepts = fw_cfg_ctl_mem_valid,
@@ -505,15 +572,15 @@ static void fw_cfg_reset(DeviceState *d)
  */
 
 static int get_uint32_as_uint16(QEMUFile *f, void *pv, size_t size,
-                                VMStateField *field)
+                                const VMStateField *field)
 {
     uint32_t *v = pv;
     *v = qemu_get_be16(f);
     return 0;
 }
 
-static int put_unused(QEMUFile *f, void *pv, size_t size, VMStateField *field,
-                      QJSON *vmdesc)
+static int put_unused(QEMUFile *f, void *pv, size_t size,
+                      const VMStateField *field, QJSON *vmdesc)
 {
     fprintf(stderr, "uint32_as_uint16 is only used for backward compatibility.\n");
     fprintf(stderr, "This functions shouldn't be called.\n");
@@ -568,11 +635,12 @@ static const VMStateDescription vmstate_fw_cfg = {
     }
 };
 
-static void fw_cfg_add_bytes_read_callback(FWCfgState *s, uint16_t key,
-                                           FWCfgReadCallback callback,
-                                           void *callback_opaque,
-                                           void *data, size_t len,
-                                           bool read_only)
+static void fw_cfg_add_bytes_callback(FWCfgState *s, uint16_t key,
+                                      FWCfgCallback select_cb,
+                                      FWCfgWriteCallback write_cb,
+                                      void *callback_opaque,
+                                      void *data, size_t len,
+                                      bool read_only)
 {
     int arch = !!(key & FW_CFG_ARCH_LOCAL);
 
@@ -583,7 +651,8 @@ static void fw_cfg_add_bytes_read_callback(FWCfgState *s, uint16_t key,
 
     s->entries[arch][key].data = data;
     s->entries[arch][key].len = (uint32_t)len;
-    s->entries[arch][key].read_callback = callback;
+    s->entries[arch][key].select_cb = select_cb;
+    s->entries[arch][key].write_cb = write_cb;
     s->entries[arch][key].callback_opaque = callback_opaque;
     s->entries[arch][key].allow_write = !read_only;
 }
@@ -610,14 +679,25 @@ static void *fw_cfg_modify_bytes_read(FWCfgState *s, uint16_t key,
 
 void fw_cfg_add_bytes(FWCfgState *s, uint16_t key, void *data, size_t len)
 {
-    fw_cfg_add_bytes_read_callback(s, key, NULL, NULL, data, len, true);
+    trace_fw_cfg_add_bytes(key, trace_key_name(key), len);
+    fw_cfg_add_bytes_callback(s, key, NULL, NULL, NULL, data, len, true);
 }
 
 void fw_cfg_add_string(FWCfgState *s, uint16_t key, const char *value)
 {
     size_t sz = strlen(value) + 1;
 
+    trace_fw_cfg_add_string(key, trace_key_name(key), value);
     fw_cfg_add_bytes(s, key, g_memdup(value, sz), sz);
+}
+
+void fw_cfg_modify_string(FWCfgState *s, uint16_t key, const char *value)
+{
+    size_t sz = strlen(value) + 1;
+    char *old;
+
+    old = fw_cfg_modify_bytes_read(s, key, g_memdup(value, sz), sz);
+    g_free(old);
 }
 
 void fw_cfg_add_i16(FWCfgState *s, uint16_t key, uint16_t value)
@@ -626,6 +706,7 @@ void fw_cfg_add_i16(FWCfgState *s, uint16_t key, uint16_t value)
 
     copy = g_malloc(sizeof(value));
     *copy = cpu_to_le16(value);
+    trace_fw_cfg_add_i16(key, trace_key_name(key), value);
     fw_cfg_add_bytes(s, key, copy, sizeof(value));
 }
 
@@ -645,7 +726,18 @@ void fw_cfg_add_i32(FWCfgState *s, uint16_t key, uint32_t value)
 
     copy = g_malloc(sizeof(value));
     *copy = cpu_to_le32(value);
+    trace_fw_cfg_add_i32(key, trace_key_name(key), value);
     fw_cfg_add_bytes(s, key, copy, sizeof(value));
+}
+
+void fw_cfg_modify_i32(FWCfgState *s, uint16_t key, uint32_t value)
+{
+    uint32_t *copy, *old;
+
+    copy = g_malloc(sizeof(value));
+    *copy = cpu_to_le32(value);
+    old = fw_cfg_modify_bytes_read(s, key, copy, sizeof(value));
+    g_free(old);
 }
 
 void fw_cfg_add_i64(FWCfgState *s, uint16_t key, uint64_t value)
@@ -654,7 +746,18 @@ void fw_cfg_add_i64(FWCfgState *s, uint16_t key, uint64_t value)
 
     copy = g_malloc(sizeof(value));
     *copy = cpu_to_le64(value);
+    trace_fw_cfg_add_i64(key, trace_key_name(key), value);
     fw_cfg_add_bytes(s, key, copy, sizeof(value));
+}
+
+void fw_cfg_modify_i64(FWCfgState *s, uint16_t key, uint64_t value)
+{
+    uint64_t *copy, *old;
+
+    copy = g_malloc(sizeof(value));
+    *copy = cpu_to_le64(value);
+    old = fw_cfg_modify_bytes_read(s, key, copy, sizeof(value));
+    g_free(old);
 }
 
 void fw_cfg_set_order_override(FWCfgState *s, int order)
@@ -736,7 +839,9 @@ static int get_fw_cfg_order(FWCfgState *s, const char *name)
 }
 
 void fw_cfg_add_file_callback(FWCfgState *s,  const char *filename,
-                              FWCfgReadCallback callback, void *callback_opaque,
+                              FWCfgCallback select_cb,
+                              FWCfgWriteCallback write_cb,
+                              void *callback_opaque,
                               void *data, size_t len, bool read_only)
 {
     int i, index, count;
@@ -777,7 +882,7 @@ void fw_cfg_add_file_callback(FWCfgState *s,  const char *filename,
      * index and "i - 1" is the one being copied from, thus the
      * unusual start and end in the for statement.
      */
-    for (i = count + 1; i > index; i--) {
+    for (i = count; i > index; i--) {
         s->files->f[i] = s->files->f[i - 1];
         s->files->f[i].select = cpu_to_be16(FW_CFG_FILE_FIRST + i);
         s->entries[0][FW_CFG_FILE_FIRST + i] =
@@ -798,9 +903,10 @@ void fw_cfg_add_file_callback(FWCfgState *s,  const char *filename,
         }
     }
 
-    fw_cfg_add_bytes_read_callback(s, FW_CFG_FILE_FIRST + index,
-                                   callback, callback_opaque, data, len,
-                                   read_only);
+    fw_cfg_add_bytes_callback(s, FW_CFG_FILE_FIRST + index,
+                              select_cb, write_cb,
+                              callback_opaque, data, len,
+                              read_only);
 
     s->files->f[index].size   = cpu_to_be32(len);
     s->files->f[index].select = cpu_to_be16(FW_CFG_FILE_FIRST + index);
@@ -813,7 +919,7 @@ void fw_cfg_add_file_callback(FWCfgState *s,  const char *filename,
 void fw_cfg_add_file(FWCfgState *s,  const char *filename,
                      void *data, size_t len)
 {
-    fw_cfg_add_file_callback(s, filename, NULL, NULL, data, len, true);
+    fw_cfg_add_file_callback(s, filename, NULL, NULL, NULL, data, len, true);
 }
 
 void *fw_cfg_modify_file(FWCfgState *s, const char *filename,
@@ -825,7 +931,6 @@ void *fw_cfg_modify_file(FWCfgState *s, const char *filename,
     assert(s->files);
 
     index = be32_to_cpu(s->files->count);
-    assert(index < fw_cfg_file_slots(s));
 
     for (i = 0; i < index; i++) {
         if (strcmp(filename, s->files->f[i].name) == 0) {
@@ -835,20 +940,31 @@ void *fw_cfg_modify_file(FWCfgState *s, const char *filename,
             return ptr;
         }
     }
+
+    assert(index < fw_cfg_file_slots(s));
+
     /* add new one */
-    fw_cfg_add_file_callback(s, filename, NULL, NULL, data, len, true);
+    fw_cfg_add_file_callback(s, filename, NULL, NULL, NULL, data, len, true);
     return NULL;
 }
 
 static void fw_cfg_machine_reset(void *opaque)
 {
+    MachineClass *mc = MACHINE_GET_CLASS(qdev_get_machine());
+    FWCfgState *s = opaque;
     void *ptr;
     size_t len;
-    FWCfgState *s = opaque;
-    char *bootindex = get_boot_devices_list(&len, false);
+    char *buf;
 
-    ptr = fw_cfg_modify_file(s, "bootorder", (uint8_t *)bootindex, len);
+    buf = get_boot_devices_list(&len);
+    ptr = fw_cfg_modify_file(s, "bootorder", (uint8_t *)buf, len);
     g_free(ptr);
+
+    if (!mc->legacy_fw_cfg_order) {
+        buf = get_boot_devices_lchs_list(&len);
+        ptr = fw_cfg_modify_file(s, "bios-geometry", (uint8_t *)buf, len);
+        g_free(ptr);
+    }
 }
 
 static void fw_cfg_machine_ready(struct Notifier *n, void *data)
@@ -1093,12 +1209,7 @@ static void fw_cfg_mem_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(sbd, &s->ctl_iomem);
 
     if (s->data_width > data_ops->valid.max_access_size) {
-        /* memberwise copy because the "old_mmio" member is const */
-        s->wide_data_ops.read       = data_ops->read;
-        s->wide_data_ops.write      = data_ops->write;
-        s->wide_data_ops.endianness = data_ops->endianness;
-        s->wide_data_ops.valid      = data_ops->valid;
-        s->wide_data_ops.impl       = data_ops->impl;
+        s->wide_data_ops = *data_ops;
 
         s->wide_data_ops.valid.max_access_size = s->data_width;
         s->wide_data_ops.impl.max_access_size  = s->data_width;

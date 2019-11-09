@@ -190,10 +190,6 @@ The appropriate DEVNAME depends on the machine type.  For type "pc":
 
   -device usb-braille,chardev=braille -chardev braille,id=braille
 
-* -virtioconsole becomes
-  -device virtio-serial-pci,class=C,vectors=V,ioeventfd=IOEVENTFD,max_ports=N
-  -device virtconsole,is_console=NUM,nr=NR,name=NAME
-
 LEGACY-CHARDEV translates to -chardev HOST-OPTS... as follows:
 
 * null becomes -chardev null
@@ -276,9 +272,6 @@ Not all devices are available with -device at this time.  All PCI
 devices and ne2k_isa are.
 
 Some PCI devices aren't available with -net nic, e.g. i82558a.
-
-To connect to a VLAN instead of an ordinary host part, replace
-netdev=NET-ID by vlan=VLAN.
 
 === Graphics Devices ===
 
@@ -366,17 +359,9 @@ bus=PCI-BUS,addr=DEVFN to control the PCI device address, as usual.
 === Host Device Assignment ===
 
 QEMU supports assigning host PCI devices (qemu-kvm only at this time)
-and host USB devices.
+and host USB devices.  PCI devices can only be assigned with -device:
 
-The old way to assign a host PCI device is
-
-    -pcidevice host=ADDR,dma=none,id=ID
-
-The new way is
-
-    -device pci-assign,host=ADDR,iommu=IOMMU,id=ID
-
-The old dma=none becomes iommu=off with -device.
+    -device vfio-pci,host=ADDR,id=ID
 
 The old way to assign a host USB device is
 

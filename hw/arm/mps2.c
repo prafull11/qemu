@@ -23,9 +23,10 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
-#include "hw/arm/arm.h"
+#include "hw/arm/boot.h"
 #include "hw/arm/armv7m.h"
 #include "hw/or-irq.h"
 #include "hw/boards.h"
@@ -34,8 +35,9 @@
 #include "hw/misc/unimp.h"
 #include "hw/char/cmsdk-apb-uart.h"
 #include "hw/timer/cmsdk-apb-timer.h"
+#include "hw/timer/cmsdk-apb-dualtimer.h"
 #include "hw/misc/mps2-scc.h"
-#include "hw/devices.h"
+#include "hw/net/lan9118.h"
 #include "net/net.h"
 
 typedef enum MPS2FPGAType {
@@ -46,7 +48,6 @@ typedef enum MPS2FPGAType {
 typedef struct {
     MachineClass parent;
     MPS2FPGAType fpga_type;
-    const char *cpu_model;
     uint32_t scc_id;
 } MPS2MachineClass;
 
@@ -65,6 +66,7 @@ typedef struct {
     MemoryRegion blockram_m3;
     MemoryRegion sram;
     MPS2SCC scc;
+    CMSDKAPBDualTimer dualtimer;
 } MPS2MachineState;
 
 #define TYPE_MPS2_MACHINE "mps2"
@@ -107,14 +109,12 @@ static void mps2_common_init(MachineState *machine)
     MPS2MachineState *mms = MPS2_MACHINE(machine);
     MPS2MachineClass *mmc = MPS2_MACHINE_GET_CLASS(machine);
     MemoryRegion *system_memory = get_system_memory();
+    MachineClass *mc = MACHINE_GET_CLASS(machine);
     DeviceState *armv7m, *sccdev;
 
-    if (!machine->cpu_model) {
-        machine->cpu_model = mmc->cpu_model;
-    }
-
-    if (strcmp(machine->cpu_model, mmc->cpu_model) != 0) {
-        error_report("This board can only be used with CPU %s", mmc->cpu_model);
+    if (strcmp(machine->cpu_type, mc->default_cpu_type) != 0) {
+        error_report("This board can only be used with CPU %s",
+                     mc->default_cpu_type);
         exit(1);
     }
 
@@ -147,7 +147,7 @@ static void mps2_common_init(MachineState *machine)
      * zbt_boot_ctrl is always zero).
      */
     memory_region_allocate_system_memory(&mms->psram,
-                                         NULL, "mps.ram", 0x1000000);
+                                         NULL, "mps.ram", 16 * MiB);
     memory_region_add_subregion(system_memory, 0x21000000, &mms->psram);
 
     switch (mmc->fpga_type) {
@@ -175,9 +175,9 @@ static void mps2_common_init(MachineState *machine)
         g_assert_not_reached();
     }
 
-    object_initialize(&mms->armv7m, sizeof(mms->armv7m), TYPE_ARMV7M);
+    sysbus_init_child_obj(OBJECT(mms), "armv7m", &mms->armv7m,
+                          sizeof(mms->armv7m), TYPE_ARMV7M);
     armv7m = DEVICE(&mms->armv7m);
-    qdev_set_parent_bus(armv7m, sysbus_get_default());
     switch (mmc->fpga_type) {
     case FPGA_AN385:
         qdev_prop_set_uint32(armv7m, "num-irq", 32);
@@ -188,7 +188,8 @@ static void mps2_common_init(MachineState *machine)
     default:
         g_assert_not_reached();
     }
-    qdev_prop_set_string(armv7m, "cpu-model", machine->cpu_model);
+    qdev_prop_set_string(armv7m, "cpu-type", machine->cpu_type);
+    qdev_prop_set_bit(armv7m, "enable-bitband", true);
     object_property_set_link(OBJECT(&mms->armv7m), OBJECT(system_memory),
                              "memory", &error_abort);
     object_property_set_bool(OBJECT(&mms->armv7m), true, "realized",
@@ -233,7 +234,6 @@ static void mps2_common_init(MachineState *machine)
             static const hwaddr uartbase[] = {0x40004000, 0x40005000,
                                               0x40006000, 0x40007000,
                                               0x40009000};
-            Chardev *uartchr = i < MAX_SERIAL_PORTS ? serial_hds[i] : NULL;
             /* RX irq number; TX irq is always one greater */
             static const int uartirq[] = {0, 2, 4, 18, 20};
             qemu_irq txovrint = NULL, rxovrint = NULL;
@@ -248,7 +248,7 @@ static void mps2_common_init(MachineState *machine)
                                   qdev_get_gpio_in(armv7m, uartirq[i]),
                                   txovrint, rxovrint,
                                   NULL,
-                                  uartchr, SYSCLK_FRQ);
+                                  serial_hd(i), SYSCLK_FRQ);
         }
         break;
     }
@@ -273,7 +273,6 @@ static void mps2_common_init(MachineState *machine)
             static const hwaddr uartbase[] = {0x40004000, 0x40005000,
                                               0x4002c000, 0x4002d000,
                                               0x4002e000};
-            Chardev *uartchr = i < MAX_SERIAL_PORTS ? serial_hds[i] : NULL;
             Object *txrx_orgate;
             DeviceState *txrx_orgate_dev;
 
@@ -287,10 +286,10 @@ static void mps2_common_init(MachineState *machine)
             cmsdk_apb_uart_create(uartbase[i],
                                   qdev_get_gpio_in(txrx_orgate_dev, 0),
                                   qdev_get_gpio_in(txrx_orgate_dev, 1),
-                                  qdev_get_gpio_in(orgate_dev, 0),
-                                  qdev_get_gpio_in(orgate_dev, 1),
+                                  qdev_get_gpio_in(orgate_dev, i * 2),
+                                  qdev_get_gpio_in(orgate_dev, i * 2 + 1),
                                   NULL,
-                                  uartchr, SYSCLK_FRQ);
+                                  serial_hd(i), SYSCLK_FRQ);
         }
         break;
     }
@@ -301,11 +300,20 @@ static void mps2_common_init(MachineState *machine)
     cmsdk_apb_timer_create(0x40000000, qdev_get_gpio_in(armv7m, 8), SYSCLK_FRQ);
     cmsdk_apb_timer_create(0x40001000, qdev_get_gpio_in(armv7m, 9), SYSCLK_FRQ);
 
-    object_initialize(&mms->scc, sizeof(mms->scc), TYPE_MPS2_SCC);
+    sysbus_init_child_obj(OBJECT(mms), "dualtimer", &mms->dualtimer,
+                          sizeof(mms->dualtimer), TYPE_CMSDK_APB_DUALTIMER);
+    qdev_prop_set_uint32(DEVICE(&mms->dualtimer), "pclk-frq", SYSCLK_FRQ);
+    object_property_set_bool(OBJECT(&mms->dualtimer), true, "realized",
+                             &error_fatal);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&mms->dualtimer), 0,
+                       qdev_get_gpio_in(armv7m, 10));
+    sysbus_mmio_map(SYS_BUS_DEVICE(&mms->dualtimer), 0, 0x40002000);
+
+    sysbus_init_child_obj(OBJECT(mms), "scc", &mms->scc,
+                          sizeof(mms->scc), TYPE_MPS2_SCC);
     sccdev = DEVICE(&mms->scc);
-    qdev_set_parent_bus(sccdev, sysbus_get_default());
     qdev_prop_set_uint32(sccdev, "scc-cfg4", 0x2);
-    qdev_prop_set_uint32(sccdev, "scc-aid", 0x02000008);
+    qdev_prop_set_uint32(sccdev, "scc-aid", 0x00200008);
     qdev_prop_set_uint32(sccdev, "scc-id", mmc->scc_id);
     object_property_set_bool(OBJECT(&mms->scc), true, "realized",
                              &error_fatal);
@@ -339,8 +347,8 @@ static void mps2_an385_class_init(ObjectClass *oc, void *data)
 
     mc->desc = "ARM MPS2 with AN385 FPGA image for Cortex-M3";
     mmc->fpga_type = FPGA_AN385;
-    mmc->cpu_model = "cortex-m3";
-    mmc->scc_id = 0x41040000 | (385 << 4);
+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-m3");
+    mmc->scc_id = 0x41043850;
 }
 
 static void mps2_an511_class_init(ObjectClass *oc, void *data)
@@ -350,8 +358,8 @@ static void mps2_an511_class_init(ObjectClass *oc, void *data)
 
     mc->desc = "ARM MPS2 with AN511 DesignStart FPGA image for Cortex-M3";
     mmc->fpga_type = FPGA_AN511;
-    mmc->cpu_model = "cortex-m3";
-    mmc->scc_id = 0x4104000 | (511 << 4);
+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-m3");
+    mmc->scc_id = 0x41045110;
 }
 
 static const TypeInfo mps2_info = {

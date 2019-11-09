@@ -15,7 +15,7 @@
 #ifndef QAPI_VISITOR_H
 #define QAPI_VISITOR_H
 
-#include "qapi/qmp/qobject.h"
+#include "qapi/qapi-builtin-types.h"
 
 /*
  * The QAPI schema defines both a set of C data types, and a QMP wire
@@ -364,10 +364,10 @@ void visit_start_list(Visitor *v, const char *name, GenericList **list,
  * @tail must not be NULL; on the first call, @tail is the value of
  * *list after visit_start_list(), and on subsequent calls @tail must
  * be the previously returned value.  Should be called in a loop until
- * a NULL return or error occurs; for each non-NULL return, the caller
- * then calls the appropriate visit_type_*() for the element type of
- * the list, with that function's name parameter set to NULL and obj
- * set to the address of @tail->value.
+ * a NULL return; for each non-NULL return, the caller then calls the
+ * appropriate visit_type_*() for the element type of the list, with
+ * that function's name parameter set to NULL and obj set to the
+ * address of @tail->value.
  */
 GenericList *visit_next_list(Visitor *v, GenericList *tail, size_t size);
 
@@ -469,7 +469,7 @@ bool visit_optional(Visitor *v, const char *name, bool *present);
  * that visit_type_str() must have no unwelcome side effects.
  */
 void visit_type_enum(Visitor *v, const char *name, int *obj,
-                     const char *const strings[], Error **errp);
+                     const QEnumLookup *lookup, Error **errp);
 
 /*
  * Check if visitor is an input visitor.

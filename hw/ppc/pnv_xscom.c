@@ -16,10 +16,10 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
+
 #include "qemu/osdep.h"
-#include "qapi/error.h"
-#include "hw/hw.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 #include "sysemu/hw_accel.h"
 #include "target/ppc/cpu.h"
 #include "hw/sysbus.h"
@@ -29,6 +29,22 @@
 #include "hw/ppc/pnv_xscom.h"
 
 #include <libfdt.h>
+
+/* PRD registers */
+#define PRD_P8_IPOLL_REG_MASK           0x01020013
+#define PRD_P8_IPOLL_REG_STATUS         0x01020014
+#define PRD_P9_IPOLL_REG_MASK           0x000F0033
+#define PRD_P9_IPOLL_REG_STATUS         0x000F0034
+
+/* PBA BARs */
+#define P8_PBA_BAR0                     0x2013f00
+#define P8_PBA_BAR2                     0x2013f02
+#define P8_PBA_BARMASK0                 0x2013f04
+#define P8_PBA_BARMASK2                 0x2013f06
+#define P9_PBA_BAR0                     0x5012b00
+#define P9_PBA_BAR2                     0x5012b02
+#define P9_PBA_BARMASK0                 0x5012b04
+#define P9_PBA_BARMASK2                 0x5012b06
 
 static void xscom_complete(CPUState *cs, uint64_t hmer_bits)
 {
@@ -51,10 +67,9 @@ static void xscom_complete(CPUState *cs, uint64_t hmer_bits)
 
 static uint32_t pnv_xscom_pcba(PnvChip *chip, uint64_t addr)
 {
-    PnvChipClass *pcc = PNV_CHIP_GET_CLASS(chip);
-
     addr &= (PNV_XSCOM_SIZE - 1);
-    if (pcc->chip_type == PNV_CHIP_POWER9) {
+
+    if (pnv_chip_is_power9(chip)) {
         return addr >> 3;
     } else {
         return ((addr >> 4) & ~0xfull) | ((addr >> 3) & 0xf);
@@ -66,25 +81,67 @@ static uint64_t xscom_read_default(PnvChip *chip, uint32_t pcba)
     switch (pcba) {
     case 0xf000f:
         return PNV_CHIP_GET_CLASS(chip)->chip_cfam_id;
+    case 0x18002:       /* ECID2 */
+        return 0;
+
+    case P9_PBA_BAR0:
+        return PNV9_HOMER_BASE(chip);
+    case P8_PBA_BAR0:
+        return PNV_HOMER_BASE(chip);
+
+    case P9_PBA_BARMASK0: /* P9 homer region size */
+        return PNV9_HOMER_SIZE;
+    case P8_PBA_BARMASK0: /* P8 homer region size */
+        return PNV_HOMER_SIZE;
+
+    case P9_PBA_BAR2: /* P9 occ common area */
+        return PNV9_OCC_COMMON_AREA(chip);
+    case P8_PBA_BAR2: /* P8 occ common area */
+        return PNV_OCC_COMMON_AREA(chip);
+
+    case P9_PBA_BARMASK2: /* P9 occ common area size */
+        return PNV9_OCC_COMMON_AREA_SIZE;
+    case P8_PBA_BARMASK2: /* P8 occ common area size */
+        return PNV_OCC_COMMON_AREA_SIZE;
+
     case 0x1010c00:     /* PIBAM FIR */
     case 0x1010c03:     /* PIBAM FIR MASK */
-    case 0x2020007:     /* ADU stuff */
-    case 0x2020009:     /* ADU stuff */
-    case 0x202000f:     /* ADU stuff */
+
+        /* PRD registers */
+    case PRD_P8_IPOLL_REG_MASK:
+    case PRD_P8_IPOLL_REG_STATUS:
+    case PRD_P9_IPOLL_REG_MASK:
+    case PRD_P9_IPOLL_REG_STATUS:
+
+        /* P9 xscom reset */
+    case 0x0090018:     /* Receive status reg */
+    case 0x0090012:     /* log register */
+    case 0x0090013:     /* error register */
+
+        /* P8 xscom reset */
+    case 0x2020007:     /* ADU stuff, log register */
+    case 0x2020009:     /* ADU stuff, error register */
+    case 0x202000f:     /* ADU stuff, receive status register*/
         return 0;
-    case 0x2013f00:     /* PBA stuff */
     case 0x2013f01:     /* PBA stuff */
-    case 0x2013f02:     /* PBA stuff */
     case 0x2013f03:     /* PBA stuff */
-    case 0x2013f04:     /* PBA stuff */
     case 0x2013f05:     /* PBA stuff */
-    case 0x2013f06:     /* PBA stuff */
     case 0x2013f07:     /* PBA stuff */
         return 0;
     case 0x2013028:     /* CAPP stuff */
     case 0x201302a:     /* CAPP stuff */
     case 0x2013801:     /* CAPP stuff */
     case 0x2013802:     /* CAPP stuff */
+
+        /* P9 CAPP regs */
+    case 0x2010841:
+    case 0x2010842:
+    case 0x201082a:
+    case 0x2010828:
+    case 0x4010841:
+    case 0x4010842:
+    case 0x401082a:
+    case 0x4010828:
         return 0;
     default:
         return -1;
@@ -102,9 +159,36 @@ static bool xscom_write_default(PnvChip *chip, uint32_t pcba, uint64_t val)
     case 0x1010c03:     /* PIBAM FIR MASK */
     case 0x1010c04:     /* PIBAM FIR MASK */
     case 0x1010c05:     /* PIBAM FIR MASK */
-    case 0x2020007:     /* ADU stuff */
-    case 0x2020009:     /* ADU stuff */
-    case 0x202000f:     /* ADU stuff */
+        /* P9 xscom reset */
+    case 0x0090018:     /* Receive status reg */
+    case 0x0090012:     /* log register */
+    case 0x0090013:     /* error register */
+
+        /* P8 xscom reset */
+    case 0x2020007:     /* ADU stuff, log register */
+    case 0x2020009:     /* ADU stuff, error register */
+    case 0x202000f:     /* ADU stuff, receive status register*/
+
+    case 0x2013028:     /* CAPP stuff */
+    case 0x201302a:     /* CAPP stuff */
+    case 0x2013801:     /* CAPP stuff */
+    case 0x2013802:     /* CAPP stuff */
+
+        /* P9 CAPP regs */
+    case 0x2010841:
+    case 0x2010842:
+    case 0x201082a:
+    case 0x2010828:
+    case 0x4010841:
+    case 0x4010842:
+    case 0x401082a:
+    case 0x4010828:
+
+        /* P8 PRD registers */
+    case PRD_P8_IPOLL_REG_MASK:
+    case PRD_P8_IPOLL_REG_STATUS:
+    case PRD_P9_IPOLL_REG_MASK:
+    case PRD_P9_IPOLL_REG_STATUS:
         return true;
     default:
         return false;
@@ -174,17 +258,17 @@ const MemoryRegionOps pnv_xscom_ops = {
     .endianness = DEVICE_BIG_ENDIAN,
 };
 
-void pnv_xscom_realize(PnvChip *chip, Error **errp)
+void pnv_xscom_realize(PnvChip *chip, uint64_t size, Error **errp)
 {
     SysBusDevice *sbd = SYS_BUS_DEVICE(chip);
     char *name;
 
     name = g_strdup_printf("xscom-%x", chip->chip_id);
     memory_region_init_io(&chip->xscom_mmio, OBJECT(chip), &pnv_xscom_ops,
-                          chip, name, PNV_XSCOM_SIZE);
+                          chip, name, size);
     sysbus_init_mmio(sbd, &chip->xscom_mmio);
 
-    memory_region_init(&chip->xscom, OBJECT(chip), name, PNV_XSCOM_SIZE);
+    memory_region_init(&chip->xscom, OBJECT(chip), name, size);
     address_space_init(&chip->xscom_as, &chip->xscom, name);
     g_free(name);
 }
@@ -207,15 +291,15 @@ typedef struct ForeachPopulateArgs {
     int xscom_offset;
 } ForeachPopulateArgs;
 
-static int xscom_populate_child(Object *child, void *opaque)
+static int xscom_dt_child(Object *child, void *opaque)
 {
     if (object_dynamic_cast(child, TYPE_PNV_XSCOM_INTERFACE)) {
         ForeachPopulateArgs *args = opaque;
         PnvXScomInterface *xd = PNV_XSCOM_INTERFACE(child);
         PnvXScomInterfaceClass *xc = PNV_XSCOM_INTERFACE_GET_CLASS(xd);
 
-        if (xc->populate) {
-            _FDT((xc->populate(xd, args->fdt, args->xscom_offset)));
+        if (xc->dt_xscom) {
+            _FDT((xc->dt_xscom(xd, args->fdt, args->xscom_offset)));
         }
     }
     return 0;
@@ -224,14 +308,20 @@ static int xscom_populate_child(Object *child, void *opaque)
 static const char compat_p8[] = "ibm,power8-xscom\0ibm,xscom";
 static const char compat_p9[] = "ibm,power9-xscom\0ibm,xscom";
 
-int pnv_xscom_populate(PnvChip *chip, void *fdt, int root_offset)
+int pnv_dt_xscom(PnvChip *chip, void *fdt, int root_offset)
 {
-    uint64_t reg[] = { cpu_to_be64(PNV_XSCOM_BASE(chip)),
-                       cpu_to_be64(PNV_XSCOM_SIZE) };
+    uint64_t reg[2];
     int xscom_offset;
     ForeachPopulateArgs args;
     char *name;
-    PnvChipClass *pcc = PNV_CHIP_GET_CLASS(chip);
+
+    if (pnv_chip_is_power9(chip)) {
+        reg[0] = cpu_to_be64(PNV9_XSCOM_BASE(chip));
+        reg[1] = cpu_to_be64(PNV9_XSCOM_SIZE);
+    } else {
+        reg[0] = cpu_to_be64(PNV_XSCOM_BASE(chip));
+        reg[1] = cpu_to_be64(PNV_XSCOM_SIZE);
+    }
 
     name = g_strdup_printf("xscom@%" PRIx64, be64_to_cpu(reg[0]));
     xscom_offset = fdt_add_subnode(fdt, root_offset, name);
@@ -242,7 +332,7 @@ int pnv_xscom_populate(PnvChip *chip, void *fdt, int root_offset)
     _FDT((fdt_setprop_cell(fdt, xscom_offset, "#size-cells", 1)));
     _FDT((fdt_setprop(fdt, xscom_offset, "reg", reg, sizeof(reg))));
 
-    if (pcc->chip_type == PNV_CHIP_POWER9) {
+    if (pnv_chip_is_power9(chip)) {
         _FDT((fdt_setprop(fdt, xscom_offset, "compatible", compat_p9,
                           sizeof(compat_p9))));
     } else {
@@ -255,7 +345,7 @@ int pnv_xscom_populate(PnvChip *chip, void *fdt, int root_offset)
     args.fdt = fdt;
     args.xscom_offset = xscom_offset;
 
-    object_child_foreach(OBJECT(chip), xscom_populate_child, &args);
+    object_child_foreach(OBJECT(chip), xscom_dt_child, &args);
     return 0;
 }
 

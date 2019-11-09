@@ -20,7 +20,7 @@
 #ifndef QEMU_ARM_CPU_QOM_H
 #define QEMU_ARM_CPU_QOM_H
 
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
 
 struct arm_boot_info;
 
@@ -32,6 +32,10 @@ struct arm_boot_info;
     OBJECT_CHECK(ARMCPU, (obj), TYPE_ARM_CPU)
 #define ARM_CPU_GET_CLASS(obj) \
     OBJECT_GET_CLASS(ARMCPUClass, (obj), TYPE_ARM_CPU)
+
+#define TYPE_ARM_MAX_CPU "max-" TYPE_ARM_CPU
+
+typedef struct ARMCPUInfo ARMCPUInfo;
 
 /**
  * ARMCPUClass:
@@ -45,6 +49,7 @@ typedef struct ARMCPUClass {
     CPUClass parent_class;
     /*< public >*/
 
+    const ARMCPUInfo *info;
     DeviceRealize parent_realize;
     void (*parent_reset)(CPUState *cpu);
 } ARMCPUClass;

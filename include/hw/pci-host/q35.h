@@ -15,14 +15,13 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, see <http://www.gnu.org/licenses/>
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <http://www.gnu.org/licenses/>
  */
 
 #ifndef HW_Q35_H
 #define HW_Q35_H
 
-#include "hw/hw.h"
 #include "hw/isa/isa.h"
 #include "hw/sysbus.h"
 #include "hw/i386/pc.h"
@@ -68,6 +67,7 @@ typedef struct Q35PCIHost {
     PCIExpressHost parent_obj;
     /*< public >*/
 
+    bool pci_hole64_fix;
     MCHPCIState mch;
 } Q35PCIHost;
 

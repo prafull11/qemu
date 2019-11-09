@@ -11,17 +11,167 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/option.h"
+#include "qapi/qmp/qerror.h"
+#include "sysemu/replay.h"
+#include "qemu/units.h"
 #include "hw/boards.h"
 #include "qapi/error.h"
-#include "qapi-visit.h"
+#include "qapi/qapi-visit-common.h"
 #include "qapi/visitor.h"
 #include "hw/sysbus.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/numa.h"
 #include "qemu/error-report.h"
-#include "qemu/cutils.h"
-#include "sysemu/numa.h"
 #include "sysemu/qtest.h"
+#include "hw/pci/pci.h"
+#include "hw/mem/nvdimm.h"
+
+GlobalProperty hw_compat_4_1[] = {
+    { "virtio-pci", "x-pcie-flr-init", "off" },
+};
+const size_t hw_compat_4_1_len = G_N_ELEMENTS(hw_compat_4_1);
+
+GlobalProperty hw_compat_4_0[] = {
+    { "VGA",            "edid", "false" },
+    { "secondary-vga",  "edid", "false" },
+    { "bochs-display",  "edid", "false" },
+    { "virtio-vga",     "edid", "false" },
+    { "virtio-gpu",     "edid", "false" },
+    { "virtio-device", "use-started", "false" },
+    { "virtio-balloon-device", "qemu-4-0-config-size", "true" },
+    { "pl031", "migrate-tick-offset", "false" },
+};
+const size_t hw_compat_4_0_len = G_N_ELEMENTS(hw_compat_4_0);
+
+GlobalProperty hw_compat_3_1[] = {
+    { "pcie-root-port", "x-speed", "2_5" },
+    { "pcie-root-port", "x-width", "1" },
+    { "memory-backend-file", "x-use-canonical-path-for-ramblock-id", "true" },
+    { "memory-backend-memfd", "x-use-canonical-path-for-ramblock-id", "true" },
+    { "tpm-crb", "ppi", "false" },
+    { "tpm-tis", "ppi", "false" },
+    { "usb-kbd", "serial", "42" },
+    { "usb-mouse", "serial", "42" },
+    { "usb-tablet", "serial", "42" },
+    { "virtio-blk-device", "discard", "false" },
+    { "virtio-blk-device", "write-zeroes", "false" },
+    { "virtio-balloon-device", "qemu-4-0-config-size", "false" },
+    { "pcie-root-port-base", "disable-acs", "true" }, /* Added in 4.1 */
+};
+const size_t hw_compat_3_1_len = G_N_ELEMENTS(hw_compat_3_1);
+
+GlobalProperty hw_compat_3_0[] = {};
+const size_t hw_compat_3_0_len = G_N_ELEMENTS(hw_compat_3_0);
+
+GlobalProperty hw_compat_2_12[] = {
+    { "migration", "decompress-error-check", "off" },
+    { "hda-audio", "use-timer", "false" },
+    { "cirrus-vga", "global-vmstate", "true" },
+    { "VGA", "global-vmstate", "true" },
+    { "vmware-svga", "global-vmstate", "true" },
+    { "qxl-vga", "global-vmstate", "true" },
+};
+const size_t hw_compat_2_12_len = G_N_ELEMENTS(hw_compat_2_12);
+
+GlobalProperty hw_compat_2_11[] = {
+    { "hpet", "hpet-offset-saved", "false" },
+    { "virtio-blk-pci", "vectors", "2" },
+    { "vhost-user-blk-pci", "vectors", "2" },
+    { "e1000", "migrate_tso_props", "off" },
+};
+const size_t hw_compat_2_11_len = G_N_ELEMENTS(hw_compat_2_11);
+
+GlobalProperty hw_compat_2_10[] = {
+    { "virtio-mouse-device", "wheel-axis", "false" },
+    { "virtio-tablet-device", "wheel-axis", "false" },
+};
+const size_t hw_compat_2_10_len = G_N_ELEMENTS(hw_compat_2_10);
+
+GlobalProperty hw_compat_2_9[] = {
+    { "pci-bridge", "shpc", "off" },
+    { "intel-iommu", "pt", "off" },
+    { "virtio-net-device", "x-mtu-bypass-backend", "off" },
+    { "pcie-root-port", "x-migrate-msix", "false" },
+};
+const size_t hw_compat_2_9_len = G_N_ELEMENTS(hw_compat_2_9);
+
+GlobalProperty hw_compat_2_8[] = {
+    { "fw_cfg_mem", "x-file-slots", "0x10" },
+    { "fw_cfg_io", "x-file-slots", "0x10" },
+    { "pflash_cfi01", "old-multiple-chip-handling", "on" },
+    { "pci-bridge", "shpc", "on" },
+    { TYPE_PCI_DEVICE, "x-pcie-extcap-init", "off" },
+    { "virtio-pci", "x-pcie-deverr-init", "off" },
+    { "virtio-pci", "x-pcie-lnkctl-init", "off" },
+    { "virtio-pci", "x-pcie-pm-init", "off" },
+    { "cirrus-vga", "vgamem_mb", "8" },
+    { "isa-cirrus-vga", "vgamem_mb", "8" },
+};
+const size_t hw_compat_2_8_len = G_N_ELEMENTS(hw_compat_2_8);
+
+GlobalProperty hw_compat_2_7[] = {
+    { "virtio-pci", "page-per-vq", "on" },
+    { "virtio-serial-device", "emergency-write", "off" },
+    { "ioapic", "version", "0x11" },
+    { "intel-iommu", "x-buggy-eim", "true" },
+    { "virtio-pci", "x-ignore-backend-features", "on" },
+};
+const size_t hw_compat_2_7_len = G_N_ELEMENTS(hw_compat_2_7);
+
+GlobalProperty hw_compat_2_6[] = {
+    { "virtio-mmio", "format_transport_address", "off" },
+    /* Optional because not all virtio-pci devices support legacy mode */
+    { "virtio-pci", "disable-modern", "on",  .optional = true },
+    { "virtio-pci", "disable-legacy", "off", .optional = true },
+};
+const size_t hw_compat_2_6_len = G_N_ELEMENTS(hw_compat_2_6);
+
+GlobalProperty hw_compat_2_5[] = {
+    { "isa-fdc", "fallback", "144" },
+    { "pvscsi", "x-old-pci-configuration", "on" },
+    { "pvscsi", "x-disable-pcie", "on" },
+    { "vmxnet3", "x-old-msi-offsets", "on" },
+    { "vmxnet3", "x-disable-pcie", "on" },
+};
+const size_t hw_compat_2_5_len = G_N_ELEMENTS(hw_compat_2_5);
+
+GlobalProperty hw_compat_2_4[] = {
+    { "virtio-blk-device", "scsi", "true" },
+    { "e1000", "extra_mac_registers", "off" },
+    { "virtio-pci", "x-disable-pcie", "on" },
+    { "virtio-pci", "migrate-extra", "off" },
+    { "fw_cfg_mem", "dma_enabled", "off" },
+    { "fw_cfg_io", "dma_enabled", "off" }
+};
+const size_t hw_compat_2_4_len = G_N_ELEMENTS(hw_compat_2_4);
+
+GlobalProperty hw_compat_2_3[] = {
+    { "virtio-blk-pci", "any_layout", "off" },
+    { "virtio-balloon-pci", "any_layout", "off" },
+    { "virtio-serial-pci", "any_layout", "off" },
+    { "virtio-9p-pci", "any_layout", "off" },
+    { "virtio-rng-pci", "any_layout", "off" },
+    { TYPE_PCI_DEVICE, "x-pcie-lnksta-dllla", "off" },
+    { "migration", "send-configuration", "off" },
+    { "migration", "send-section-footer", "off" },
+    { "migration", "store-global-state", "off" },
+};
+const size_t hw_compat_2_3_len = G_N_ELEMENTS(hw_compat_2_3);
+
+GlobalProperty hw_compat_2_2[] = {};
+const size_t hw_compat_2_2_len = G_N_ELEMENTS(hw_compat_2_2);
+
+GlobalProperty hw_compat_2_1[] = {
+    { "intel-hda", "old_msi_addr", "on" },
+    { "VGA", "qemu-extended-regs", "off" },
+    { "secondary-vga", "qemu-extended-regs", "off" },
+    { "virtio-scsi-pci", "any_layout", "off" },
+    { "usb-mouse", "usb_version", "1" },
+    { "usb-kbd", "usb_version", "1" },
+    { "virtio-pci", "virtio-pci-bus-master-bug-migration", "on" },
+};
+const size_t hw_compat_2_1_len = G_N_ELEMENTS(hw_compat_2_1);
 
 static char *machine_get_accel(Object *obj, Error **errp)
 {
@@ -325,6 +475,9 @@ static void machine_set_enforce_config_section(Object *obj, bool value,
 {
     MachineState *ms = MACHINE(obj);
 
+    warn_report("enforce-config-section is deprecated, please use "
+                "-global migration.send-configuration=on|off instead");
+
     ms->enforce_config_section = value;
 }
 
@@ -335,46 +488,118 @@ static bool machine_get_enforce_config_section(Object *obj, Error **errp)
     return ms->enforce_config_section;
 }
 
-static void error_on_sysbus_device(SysBusDevice *sbdev, void *opaque)
+static char *machine_get_memory_encryption(Object *obj, Error **errp)
 {
-    error_report("Option '-device %s' cannot be handled by this machine",
-                 object_class_get_name(object_get_class(OBJECT(sbdev))));
-    exit(1);
+    MachineState *ms = MACHINE(obj);
+
+    return g_strdup(ms->memory_encryption);
+}
+
+static void machine_set_memory_encryption(Object *obj, const char *value,
+                                        Error **errp)
+{
+    MachineState *ms = MACHINE(obj);
+
+    g_free(ms->memory_encryption);
+    ms->memory_encryption = g_strdup(value);
+}
+
+static bool machine_get_nvdimm(Object *obj, Error **errp)
+{
+    MachineState *ms = MACHINE(obj);
+
+    return ms->nvdimms_state->is_enabled;
+}
+
+static void machine_set_nvdimm(Object *obj, bool value, Error **errp)
+{
+    MachineState *ms = MACHINE(obj);
+
+    ms->nvdimms_state->is_enabled = value;
+}
+
+static char *machine_get_nvdimm_persistence(Object *obj, Error **errp)
+{
+    MachineState *ms = MACHINE(obj);
+
+    return g_strdup(ms->nvdimms_state->persistence_string);
+}
+
+static void machine_set_nvdimm_persistence(Object *obj, const char *value,
+                                           Error **errp)
+{
+    MachineState *ms = MACHINE(obj);
+    NVDIMMState *nvdimms_state = ms->nvdimms_state;
+
+    if (strcmp(value, "cpu") == 0) {
+        nvdimms_state->persistence = 3;
+    } else if (strcmp(value, "mem-ctrl") == 0) {
+        nvdimms_state->persistence = 2;
+    } else {
+        error_setg(errp, "-machine nvdimm-persistence=%s: unsupported option",
+                   value);
+        return;
+    }
+
+    g_free(nvdimms_state->persistence_string);
+    nvdimms_state->persistence_string = g_strdup(value);
+}
+
+void machine_class_allow_dynamic_sysbus_dev(MachineClass *mc, const char *type)
+{
+    strList *item = g_new0(strList, 1);
+
+    item->value = g_strdup(type);
+    item->next = mc->allowed_dynamic_sysbus_devices;
+    mc->allowed_dynamic_sysbus_devices = item;
+}
+
+static void validate_sysbus_device(SysBusDevice *sbdev, void *opaque)
+{
+    MachineState *machine = opaque;
+    MachineClass *mc = MACHINE_GET_CLASS(machine);
+    bool allowed = false;
+    strList *wl;
+
+    for (wl = mc->allowed_dynamic_sysbus_devices;
+         !allowed && wl;
+         wl = wl->next) {
+        allowed |= !!object_dynamic_cast(OBJECT(sbdev), wl->value);
+    }
+
+    if (!allowed) {
+        error_report("Option '-device %s' cannot be handled by this machine",
+                     object_class_get_name(object_get_class(OBJECT(sbdev))));
+        exit(1);
+    }
 }
 
 static void machine_init_notify(Notifier *notifier, void *data)
 {
-    Object *machine = qdev_get_machine();
-    ObjectClass *oc = object_get_class(machine);
-    MachineClass *mc = MACHINE_CLASS(oc);
-
-    if (mc->has_dynamic_sysbus) {
-        /* Our machine can handle dynamic sysbus devices, we're all good */
-        return;
-    }
+    MachineState *machine = MACHINE(qdev_get_machine());
 
     /*
-     * Loop through all dynamically created devices and check whether there
-     * are sysbus devices among them. If there are, error out.
+     * Loop through all dynamically created sysbus devices and check if they are
+     * all allowed.  If a device is not allowed, error out.
      */
-    foreach_dynamic_sysbus_device(error_on_sysbus_device, NULL);
+    foreach_dynamic_sysbus_device(validate_sysbus_device, machine);
 }
 
 HotpluggableCPUList *machine_query_hotpluggable_cpus(MachineState *machine)
 {
     int i;
-    Object *cpu;
     HotpluggableCPUList *head = NULL;
-    const char *cpu_type;
+    MachineClass *mc = MACHINE_GET_CLASS(machine);
 
-    cpu = machine->possible_cpus->cpus[0].cpu;
-    assert(cpu); /* Boot cpu is always present */
-    cpu_type = object_get_typename(cpu);
+    /* force board to initialize possible_cpus if it hasn't been done yet */
+    mc->possible_cpu_arch_ids(machine);
+
     for (i = 0; i < machine->possible_cpus->len; i++) {
+        Object *cpu;
         HotpluggableCPUList *list_item = g_new0(typeof(*list_item), 1);
         HotpluggableCPU *cpu_item = g_new0(typeof(*cpu_item), 1);
 
-        cpu_item->type = g_strdup(cpu_type);
+        cpu_item->type = g_strdup(machine->possible_cpus->cpus[i].type);
         cpu_item->vcpus_count = machine->possible_cpus->cpus[i].vcpus_count;
         cpu_item->props = g_memdup(&machine->possible_cpus->cpus[i].props,
                                    sizeof(*cpu_item->props));
@@ -453,12 +678,21 @@ void machine_set_cpu_numa_node(MachineState *machine,
             return;
         }
 
+        if (props->has_die_id && !slot->props.has_die_id) {
+            error_setg(errp, "die-id is not supported");
+            return;
+        }
+
         /* skip slots with explicit mismatch */
         if (props->has_thread_id && props->thread_id != slot->props.thread_id) {
                 continue;
         }
 
         if (props->has_core_id && props->core_id != slot->props.core_id) {
+                continue;
+        }
+
+        if (props->has_die_id && props->die_id != slot->props.die_id) {
                 continue;
         }
 
@@ -487,13 +721,86 @@ void machine_set_cpu_numa_node(MachineState *machine,
     }
 }
 
+static void smp_parse(MachineState *ms, QemuOpts *opts)
+{
+    if (opts) {
+        unsigned cpus    = qemu_opt_get_number(opts, "cpus", 0);
+        unsigned sockets = qemu_opt_get_number(opts, "sockets", 0);
+        unsigned cores   = qemu_opt_get_number(opts, "cores", 0);
+        unsigned threads = qemu_opt_get_number(opts, "threads", 0);
+
+        /* compute missing values, prefer sockets over cores over threads */
+        if (cpus == 0 || sockets == 0) {
+            cores = cores > 0 ? cores : 1;
+            threads = threads > 0 ? threads : 1;
+            if (cpus == 0) {
+                sockets = sockets > 0 ? sockets : 1;
+                cpus = cores * threads * sockets;
+            } else {
+                ms->smp.max_cpus =
+                        qemu_opt_get_number(opts, "maxcpus", cpus);
+                sockets = ms->smp.max_cpus / (cores * threads);
+            }
+        } else if (cores == 0) {
+            threads = threads > 0 ? threads : 1;
+            cores = cpus / (sockets * threads);
+            cores = cores > 0 ? cores : 1;
+        } else if (threads == 0) {
+            threads = cpus / (cores * sockets);
+            threads = threads > 0 ? threads : 1;
+        } else if (sockets * cores * threads < cpus) {
+            error_report("cpu topology: "
+                         "sockets (%u) * cores (%u) * threads (%u) < "
+                         "smp_cpus (%u)",
+                         sockets, cores, threads, cpus);
+            exit(1);
+        }
+
+        ms->smp.max_cpus =
+                qemu_opt_get_number(opts, "maxcpus", cpus);
+
+        if (ms->smp.max_cpus < cpus) {
+            error_report("maxcpus must be equal to or greater than smp");
+            exit(1);
+        }
+
+        if (sockets * cores * threads > ms->smp.max_cpus) {
+            error_report("cpu topology: "
+                         "sockets (%u) * cores (%u) * threads (%u) > "
+                         "maxcpus (%u)",
+                         sockets, cores, threads,
+                         ms->smp.max_cpus);
+            exit(1);
+        }
+
+        if (sockets * cores * threads != ms->smp.max_cpus) {
+            warn_report("Invalid CPU topology deprecated: "
+                        "sockets (%u) * cores (%u) * threads (%u) "
+                        "!= maxcpus (%u)",
+                        sockets, cores, threads,
+                        ms->smp.max_cpus);
+        }
+
+        ms->smp.cpus = cpus;
+        ms->smp.cores = cores;
+        ms->smp.threads = threads;
+    }
+
+    if (ms->smp.cpus > 1) {
+        Error *blocker = NULL;
+        error_setg(&blocker, QERR_REPLAY_NOT_SUPPORTED, "smp");
+        replay_add_blocker(blocker);
+    }
+}
+
 static void machine_class_init(ObjectClass *oc, void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
     /* Default 128 MB as guest ram size */
-    mc->default_ram_size = 128 * M_BYTE;
+    mc->default_ram_size = 128 * MiB;
     mc->rom_file_has_mr = true;
+    mc->smp_parse = smp_parse;
 
     /* numa node memory size aligned on 8MB by default.
      * On Linux, each node's border has to be 8MB aligned
@@ -506,7 +813,7 @@ static void machine_class_init(ObjectClass *oc, void *data)
     object_class_property_set_description(oc, "accel",
         "Accelerator list", &error_abort);
 
-    object_class_property_add(oc, "kernel-irqchip", "OnOffSplit",
+    object_class_property_add(oc, "kernel-irqchip", "on|off|split",
         NULL, machine_set_kernel_irqchip,
         NULL, NULL, &error_abort);
     object_class_property_set_description(oc, "kernel-irqchip",
@@ -558,7 +865,7 @@ static void machine_class_init(ObjectClass *oc, void *data)
     object_class_property_add_bool(oc, "dump-guest-core",
         machine_get_dump_guest_core, machine_set_dump_guest_core, &error_abort);
     object_class_property_set_description(oc, "dump-guest-core",
-        "Include guest memory in  a core dump", &error_abort);
+        "Include guest memory in a core dump", &error_abort);
 
     object_class_property_add_bool(oc, "mem-merge",
         machine_get_mem_merge, machine_set_mem_merge, &error_abort);
@@ -598,6 +905,12 @@ static void machine_class_init(ObjectClass *oc, void *data)
         &error_abort);
     object_class_property_set_description(oc, "enforce-config-section",
         "Set on to enforce configuration section migration", &error_abort);
+
+    object_class_property_add_str(oc, "memory-encryption",
+        machine_get_memory_encryption, machine_set_memory_encryption,
+        &error_abort);
+    object_class_property_set_description(oc, "memory-encryption",
+        "Set memory encryption object to use", &error_abort);
 }
 
 static void machine_class_base_init(ObjectClass *oc, void *data)
@@ -608,18 +921,46 @@ static void machine_class_base_init(ObjectClass *oc, void *data)
         assert(g_str_has_suffix(cname, TYPE_MACHINE_SUFFIX));
         mc->name = g_strndup(cname,
                             strlen(cname) - strlen(TYPE_MACHINE_SUFFIX));
+        mc->compat_props = g_ptr_array_new();
     }
 }
 
 static void machine_initfn(Object *obj)
 {
     MachineState *ms = MACHINE(obj);
+    MachineClass *mc = MACHINE_GET_CLASS(obj);
 
     ms->kernel_irqchip_allowed = true;
+    ms->kernel_irqchip_split = mc->default_kernel_irqchip_split;
     ms->kvm_shadow_mem = -1;
     ms->dump_guest_core = true;
     ms->mem_merge = true;
     ms->enable_graphics = true;
+
+    if (mc->nvdimm_supported) {
+        Object *obj = OBJECT(ms);
+
+        ms->nvdimms_state = g_new0(NVDIMMState, 1);
+        object_property_add_bool(obj, "nvdimm",
+                                 machine_get_nvdimm, machine_set_nvdimm,
+                                 &error_abort);
+        object_property_set_description(obj, "nvdimm",
+                                        "Set on/off to enable/disable "
+                                        "NVDIMM instantiation", NULL);
+
+        object_property_add_str(obj, "nvdimm-persistence",
+                                machine_get_nvdimm_persistence,
+                                machine_set_nvdimm_persistence,
+                                &error_abort);
+        object_property_set_description(obj, "nvdimm-persistence",
+                                        "Set NVDIMM persistence"
+                                        "Valid values are cpu, mem-ctrl",
+                                        NULL);
+    }
+
+    if (mc->numa_mem_supported) {
+        ms->numa_state = g_new0(NumaState, 1);
+    }
 
     /* Register notifier when init is done for sysbus sanity checks */
     ms->sysbus_notifier.notify = machine_init_notify;
@@ -638,6 +979,9 @@ static void machine_finalize(Object *obj)
     g_free(ms->dumpdtb);
     g_free(ms->dt_compatible);
     g_free(ms->firmware);
+    g_free(ms->device_memory);
+    g_free(ms->nvdimms_state);
+    g_free(ms->numa_state);
 }
 
 bool machine_usb(MachineState *machine)
@@ -686,6 +1030,9 @@ static char *cpu_slot_to_string(const CPUArchId *cpu)
     if (cpu->props.has_socket_id) {
         g_string_append_printf(s, "socket-id: %"PRId64, cpu->props.socket_id);
     }
+    if (cpu->props.has_die_id) {
+        g_string_append_printf(s, "die-id: %"PRId64, cpu->props.die_id);
+    }
     if (cpu->props.has_core_id) {
         if (s->len) {
             g_string_append_printf(s, ", ");
@@ -701,7 +1048,7 @@ static char *cpu_slot_to_string(const CPUArchId *cpu)
     return g_string_free(s, false);
 }
 
-static void machine_numa_finish_init(MachineState *machine)
+static void machine_numa_finish_cpu_init(MachineState *machine)
 {
     int i;
     bool default_mapping;
@@ -709,7 +1056,7 @@ static void machine_numa_finish_init(MachineState *machine)
     MachineClass *mc = MACHINE_GET_CLASS(machine);
     const CPUArchIdList *possible_cpus = mc->possible_cpu_arch_ids(machine);
 
-    assert(nb_numa_nodes);
+    assert(machine->numa_state->num_nodes);
     for (i = 0; i < possible_cpus->len; i++) {
         if (possible_cpus->cpus[i].props.has_node_id) {
             break;
@@ -724,6 +1071,7 @@ static void machine_numa_finish_init(MachineState *machine)
             /* fetch default mapping from board and enable it */
             CpuInstanceProperties props = cpu_slot->props;
 
+            props.node_id = mc->get_default_cpu_node_id(machine, i);
             if (!default_mapping) {
                 /* record slots with not set mapping,
                  * TODO: make it hard error in future */
@@ -754,38 +1102,45 @@ void machine_run_board_init(MachineState *machine)
 {
     MachineClass *machine_class = MACHINE_GET_CLASS(machine);
 
-    if (nb_numa_nodes) {
-        machine_numa_finish_init(machine);
+    if (machine_class->numa_mem_supported) {
+        numa_complete_configuration(machine);
+        if (machine->numa_state->num_nodes) {
+            machine_numa_finish_cpu_init(machine);
+        }
     }
+
+    /* If the machine supports the valid_cpu_types check and the user
+     * specified a CPU with -cpu check here that the user CPU is supported.
+     */
+    if (machine_class->valid_cpu_types && machine->cpu_type) {
+        ObjectClass *class = object_class_by_name(machine->cpu_type);
+        int i;
+
+        for (i = 0; machine_class->valid_cpu_types[i]; i++) {
+            if (object_class_dynamic_cast(class,
+                                          machine_class->valid_cpu_types[i])) {
+                /* The user specificed CPU is in the valid field, we are
+                 * good to go.
+                 */
+                break;
+            }
+        }
+
+        if (!machine_class->valid_cpu_types[i]) {
+            /* The user specified CPU is not valid */
+            error_report("Invalid CPU type: %s", machine->cpu_type);
+            error_printf("The valid types are: %s",
+                         machine_class->valid_cpu_types[0]);
+            for (i = 1; machine_class->valid_cpu_types[i]; i++) {
+                error_printf(", %s", machine_class->valid_cpu_types[i]);
+            }
+            error_printf("\n");
+
+            exit(1);
+        }
+    }
+
     machine_class->init(machine);
-}
-
-static void machine_class_finalize(ObjectClass *klass, void *data)
-{
-    MachineClass *mc = MACHINE_CLASS(klass);
-
-    if (mc->compat_props) {
-        g_array_free(mc->compat_props, true);
-    }
-    g_free(mc->name);
-}
-
-void machine_register_compat_props(MachineState *machine)
-{
-    MachineClass *mc = MACHINE_GET_CLASS(machine);
-    int i;
-    GlobalProperty *p;
-
-    if (!mc->compat_props) {
-        return;
-    }
-
-    for (i = 0; i < mc->compat_props->len; i++) {
-        p = g_array_index(mc->compat_props, GlobalProperty *, i);
-        /* Machine compat_props must never cause errors: */
-        p->errp = &error_abort;
-        qdev_prop_register_global(p);
-    }
 }
 
 static const TypeInfo machine_info = {
@@ -795,7 +1150,6 @@ static const TypeInfo machine_info = {
     .class_size = sizeof(MachineClass),
     .class_init    = machine_class_init,
     .class_base_init = machine_class_base_init,
-    .class_finalize = machine_class_finalize,
     .instance_size = sizeof(MachineState),
     .instance_init = machine_initfn,
     .instance_finalize = machine_finalize,

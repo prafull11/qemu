@@ -28,12 +28,16 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu-common.h"
 #include "cpu.h"
 #include "hw/boards.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "strongarm.h"
 #include "qemu/error-report.h"
-#include "hw/arm/arm.h"
+#include "hw/arm/boot.h"
 #include "chardev/char-fe.h"
 #include "chardev/char-serial.h"
 #include "sysemu/sysemu.h"
@@ -406,11 +410,13 @@ static void strongarm_rtc_init(Object *obj)
     sysbus_init_mmio(dev, &s->iomem);
 }
 
-static void strongarm_rtc_pre_save(void *opaque)
+static int strongarm_rtc_pre_save(void *opaque)
 {
     StrongARMRTCState *s = opaque;
 
     strongarm_rtc_hzupdate(s);
+
+    return 0;
 }
 
 static int strongarm_rtc_post_load(void *opaque, int version_id)
@@ -585,12 +591,12 @@ static void strongarm_gpio_write(void *opaque, hwaddr offset,
 
     switch (offset) {
     case GPDR:        /* GPIO Pin-Direction registers */
-        s->dir = value;
+        s->dir = value & 0x0fffffff;
         strongarm_gpio_handler_update(s);
         break;
 
     case GPSR:        /* GPIO Pin-Output Set registers */
-        s->olevel |= value;
+        s->olevel |= value & 0x0fffffff;
         strongarm_gpio_handler_update(s);
         break;
 
@@ -1580,33 +1586,19 @@ static const TypeInfo strongarm_ssp_info = {
 };
 
 /* Main CPU functions */
-StrongARMState *sa1110_init(MemoryRegion *sysmem,
-                            unsigned int sdram_size, const char *rev)
+StrongARMState *sa1110_init(const char *cpu_type)
 {
     StrongARMState *s;
     int i;
 
     s = g_new0(StrongARMState, 1);
 
-    if (!rev) {
-        rev = "sa1110-b5";
-    }
-
-    if (strncmp(rev, "sa1110", 6)) {
+    if (strncmp(cpu_type, "sa1110", 6)) {
         error_report("Machine requires a SA1110 processor.");
         exit(1);
     }
 
-    s->cpu = cpu_arm_init(rev);
-
-    if (!s->cpu) {
-        error_report("Unable to find CPU definition");
-        exit(1);
-    }
-
-    memory_region_allocate_system_memory(&s->sdram, NULL, "strongarm.sdram",
-                                         sdram_size);
-    memory_region_add_subregion(sysmem, SA_SDCS0, &s->sdram);
+    s->cpu = ARM_CPU(cpu_create(cpu_type));
 
     s->pic = sysbus_create_varargs("strongarm_pic", 0x90050000,
                     qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_IRQ),
@@ -1629,7 +1621,7 @@ StrongARMState *sa1110_init(MemoryRegion *sysmem,
 
     for (i = 0; sa_serial[i].io_base; i++) {
         DeviceState *dev = qdev_create(NULL, TYPE_STRONGARM_UART);
-        qdev_prop_set_chr(dev, "chardev", serial_hds[i]);
+        qdev_prop_set_chr(dev, "chardev", serial_hd(i));
         qdev_init_nofail(dev);
         sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0,
                 sa_serial[i].io_base);

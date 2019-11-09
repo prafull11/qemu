@@ -31,10 +31,12 @@
 
 #include <glib/gprintf.h>
 
+#include "qemu-common.h"
 #include "sysemu/sysemu.h"
 #include "trace.h"
 #include "qapi/error.h"
 #include "qemu/sockets.h"
+#include "qemu/thread.h"
 #include <libgen.h>
 #include <sys/signal.h>
 #include "qemu/cutils.h"
@@ -49,6 +51,10 @@
 #include <libutil.h>
 #endif
 
+#ifdef __NetBSD__
+#include <sys/sysctl.h>
+#endif
+
 #include "qemu/mmap-alloc.h"
 
 #ifdef CONFIG_DEBUG_STACK_USAGE
@@ -59,8 +65,8 @@
 
 struct MemsetThread {
     char *addr;
-    uint64_t numpages;
-    uint64_t hpagesize;
+    size_t numpages;
+    size_t hpagesize;
     QemuThread pgthread;
     sigjmp_buf env;
 };
@@ -84,6 +90,79 @@ int qemu_daemon(int nochdir, int noclose)
     return daemon(nochdir, noclose);
 }
 
+bool qemu_write_pidfile(const char *path, Error **errp)
+{
+    int fd;
+    char pidstr[32];
+
+    while (1) {
+        struct stat a, b;
+        struct flock lock = {
+            .l_type = F_WRLCK,
+            .l_whence = SEEK_SET,
+            .l_len = 0,
+        };
+
+        fd = qemu_open(path, O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR);
+        if (fd == -1) {
+            error_setg_errno(errp, errno, "Cannot open pid file");
+            return false;
+        }
+
+        if (fstat(fd, &b) < 0) {
+            error_setg_errno(errp, errno, "Cannot stat file");
+            goto fail_close;
+        }
+
+        if (fcntl(fd, F_SETLK, &lock)) {
+            error_setg_errno(errp, errno, "Cannot lock pid file");
+            goto fail_close;
+        }
+
+        /*
+         * Now make sure the path we locked is the same one that now
+         * exists on the filesystem.
+         */
+        if (stat(path, &a) < 0) {
+            /*
+             * PID file disappeared, someone else must be racing with
+             * us, so try again.
+             */
+            close(fd);
+            continue;
+        }
+
+        if (a.st_ino == b.st_ino) {
+            break;
+        }
+
+        /*
+         * PID file was recreated, someone else must be racing with
+         * us, so try again.
+         */
+        close(fd);
+    }
+
+    if (ftruncate(fd, 0) < 0) {
+        error_setg_errno(errp, errno, "Failed to truncate pid file");
+        goto fail_unlink;
+    }
+
+    snprintf(pidstr, sizeof(pidstr), FMT_pid "\n", getpid());
+    if (write(fd, pidstr, strlen(pidstr)) != strlen(pidstr)) {
+        error_setg(errp, "Failed to write pid file");
+        goto fail_unlink;
+    }
+
+    return true;
+
+fail_unlink:
+    unlink(path);
+fail_close:
+    close(fd);
+    return false;
+}
+
 void *qemu_oom_check(void *ptr)
 {
     if (ptr == NULL) {
@@ -101,7 +180,7 @@ void *qemu_try_memalign(size_t alignment, size_t size)
         alignment = sizeof(void*);
     }
 
-#if defined(_POSIX_C_SOURCE) && !defined(__sun__)
+#if defined(CONFIG_POSIX_MEMALIGN)
     int ret;
     ret = posix_memalign(&ptr, alignment, size);
     if (ret != 0) {
@@ -123,10 +202,10 @@ void *qemu_memalign(size_t alignment, size_t size)
 }
 
 /* alloc shared memory pages */
-void *qemu_anon_ram_alloc(size_t size, uint64_t *alignment)
+void *qemu_anon_ram_alloc(size_t size, uint64_t *alignment, bool shared)
 {
     size_t align = QEMU_VMALLOC_ALIGN;
-    void *ptr = qemu_ram_mmap(-1, size, align, false);
+    void *ptr = qemu_ram_mmap(-1, size, align, shared, false);
 
     if (ptr == MAP_FAILED) {
         return NULL;
@@ -149,21 +228,37 @@ void qemu_vfree(void *ptr)
 void qemu_anon_ram_free(void *ptr, size_t size)
 {
     trace_qemu_anon_ram_free(ptr, size);
-    qemu_ram_munmap(ptr, size);
+    qemu_ram_munmap(-1, ptr, size);
 }
 
 void qemu_set_block(int fd)
 {
     int f;
     f = fcntl(fd, F_GETFL);
-    fcntl(fd, F_SETFL, f & ~O_NONBLOCK);
+    assert(f != -1);
+    f = fcntl(fd, F_SETFL, f & ~O_NONBLOCK);
+    assert(f != -1);
 }
 
 void qemu_set_nonblock(int fd)
 {
     int f;
     f = fcntl(fd, F_GETFL);
-    fcntl(fd, F_SETFL, f | O_NONBLOCK);
+    assert(f != -1);
+    f = fcntl(fd, F_SETFL, f | O_NONBLOCK);
+#ifdef __OpenBSD__
+    if (f == -1) {
+        /*
+         * Previous to OpenBSD 6.3, fcntl(F_SETFL) is not permitted on
+         * memory devices and sets errno to ENODEV.
+         * It's OK if we fail to set O_NONBLOCK on devices like /dev/null,
+         * because they will never block anyway.
+         */
+        assert(errno == ENODEV);
+    }
+#else
+    assert(f != -1);
+#endif
 }
 
 int socket_set_fast_reuse(int fd)
@@ -250,9 +345,14 @@ void qemu_init_exec_dir(const char *argv0)
             p = buf;
         }
     }
-#elif defined(__FreeBSD__)
+#elif defined(__FreeBSD__) \
+      || (defined(__NetBSD__) && defined(KERN_PROC_PATHNAME))
     {
+#if defined(__FreeBSD__)
         static int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+#else
+        static int mib[4] = {CTL_KERN, KERN_PROC_ARGS, -1, KERN_PROC_PATHNAME};
+#endif
         size_t len = sizeof(buf) - 1;
 
         *buf = '\0';
@@ -301,11 +401,7 @@ static void sigbus_handler(int signal)
 static void *do_touch_pages(void *arg)
 {
     MemsetThread *memset_args = (MemsetThread *)arg;
-    char *addr = memset_args->addr;
-    uint64_t numpages = memset_args->numpages;
-    uint64_t hpagesize = memset_args->hpagesize;
     sigset_t set, oldset;
-    int i = 0;
 
     /* unblock SIGBUS */
     sigemptyset(&set);
@@ -315,6 +411,10 @@ static void *do_touch_pages(void *arg)
     if (sigsetjmp(memset_args->env, 1)) {
         memset_thread_failed = true;
     } else {
+        char *addr = memset_args->addr;
+        size_t numpages = memset_args->numpages;
+        size_t hpagesize = memset_args->hpagesize;
+        size_t i;
         for (i = 0; i < numpages; i++) {
             /*
              * Read & write back the same value, so we don't
@@ -351,7 +451,8 @@ static inline int get_memset_num_threads(int smp_cpus)
 static bool touch_all_pages(char *area, size_t hpagesize, size_t numpages,
                             int smp_cpus)
 {
-    uint64_t numpages_per_thread, size_per_thread;
+    size_t numpages_per_thread;
+    size_t size_per_thread;
     char *addr = area;
     int i = 0;
 
@@ -412,7 +513,6 @@ void os_mem_prealloc(int fd, char *area, size_t memory, int smp_cpus,
         exit(1);
     }
 }
-
 
 char *qemu_get_pid_name(pid_t pid)
 {
@@ -513,10 +613,11 @@ pid_t qemu_fork(Error **errp)
 void *qemu_alloc_stack(size_t *sz)
 {
     void *ptr, *guardpage;
+    int flags;
 #ifdef CONFIG_DEBUG_STACK_USAGE
     void *ptr2;
 #endif
-    size_t pagesz = getpagesize();
+    size_t pagesz = qemu_real_host_page_size;
 #ifdef _SC_THREAD_STACK_MIN
     /* avoid stacks smaller than _SC_THREAD_STACK_MIN */
     long min_stack_sz = sysconf(_SC_THREAD_STACK_MIN);
@@ -527,9 +628,20 @@ void *qemu_alloc_stack(size_t *sz)
     /* allocate one extra page for the guard page */
     *sz += pagesz;
 
-    ptr = mmap(NULL, *sz, PROT_READ | PROT_WRITE,
-               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#if defined(MAP_STACK) && defined(__OpenBSD__)
+    /* Only enable MAP_STACK on OpenBSD. Other OS's such as
+     * Linux/FreeBSD/NetBSD have a flag with the same name
+     * but have differing functionality. OpenBSD will SEGV
+     * if it spots execution with a stack pointer pointing
+     * at memory that was not allocated with MAP_STACK.
+     */
+    flags |= MAP_STACK;
+#endif
+
+    ptr = mmap(NULL, *sz, PROT_READ | PROT_WRITE, flags, -1, 0);
     if (ptr == MAP_FAILED) {
+        perror("failed to allocate memory for stack");
         abort();
     }
 
@@ -544,6 +656,7 @@ void *qemu_alloc_stack(size_t *sz)
     guardpage = ptr;
 #endif
     if (mprotect(guardpage, pagesz, PROT_NONE) != 0) {
+        perror("failed to set up stack guard page");
         abort();
     }
 
@@ -566,7 +679,7 @@ void qemu_free_stack(void *stack, size_t sz)
     unsigned int usage;
     void *ptr;
 
-    for (ptr = stack + getpagesize(); ptr < stack + sz;
+    for (ptr = stack + qemu_real_host_page_size; ptr < stack + sz;
          ptr += sizeof(uint32_t)) {
         if (*(uint32_t *)ptr != 0xdeadbeaf) {
             break;

@@ -21,9 +21,13 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/iov.h"
+#include "qemu/main-loop.h"
+#include "qemu/module.h"
+#include "migration/qemu-file-types.h"
 #include "monitor/monitor.h"
 #include "qemu/error-report.h"
 #include "qemu/queue.h"
+#include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
 #include "trace.h"
 #include "hw/virtio/virtio-serial.h"
@@ -580,13 +584,16 @@ static void set_config(VirtIODevice *vdev, const uint8_t *config_data)
     VirtIOSerial *vser = VIRTIO_SERIAL(vdev);
     struct virtio_console_config *config =
         (struct virtio_console_config *)config_data;
-    uint8_t emerg_wr_lo = le32_to_cpu(config->emerg_wr);
     VirtIOSerialPort *port = find_first_connected_console(vser);
     VirtIOSerialPortClass *vsc;
+    uint8_t emerg_wr_lo;
 
-    if (!config->emerg_wr) {
+    if (!virtio_has_feature(vser->host_features,
+        VIRTIO_CONSOLE_F_EMERG_WRITE) || !config->emerg_wr) {
         return;
     }
+
+    emerg_wr_lo = le32_to_cpu(config->emerg_wr);
     /* Make sure we don't misdetect an emergency write when the guest
      * does a short config write after an emergency write. */
     config->emerg_wr = 0;
@@ -637,6 +644,13 @@ static void set_status(VirtIODevice *vdev, uint8_t status)
     if (!(status & VIRTIO_CONFIG_S_DRIVER_OK)) {
         guest_reset(vser);
     }
+
+    QTAILQ_FOREACH(port, &vser->ports, next) {
+        VirtIOSerialPortClass *vsc = VIRTIO_SERIAL_PORT_GET_CLASS(port);
+        if (vsc->enable_backend) {
+            vsc->enable_backend(port, vdev->vm_running);
+        }
+    }
 }
 
 static void vser_reset(VirtIODevice *vdev)
@@ -657,13 +671,13 @@ static void virtio_serial_save_device(VirtIODevice *vdev, QEMUFile *f)
 
     /* The config space (ignored on the far end in current versions) */
     get_config(vdev, (uint8_t *)&config);
-    qemu_put_be16s(f, &config.cols);
-    qemu_put_be16s(f, &config.rows);
-    qemu_put_be32s(f, &config.max_nr_ports);
+    qemu_put_be16(f, config.cols);
+    qemu_put_be16(f, config.rows);
+    qemu_put_be32(f, config.max_nr_ports);
 
     /* The ports map */
     max_nr_ports = s->serial.max_virtserial_ports;
-    for (i = 0; i < (max_nr_ports + 31) / 32; i++) {
+    for (i = 0; i < DIV_ROUND_UP(max_nr_ports, 32); i++) {
         qemu_put_be32s(f, &s->ports_map[i]);
     }
 
@@ -686,7 +700,7 @@ static void virtio_serial_save_device(VirtIODevice *vdev, QEMUFile *f)
         qemu_put_byte(f, port->guest_connected);
         qemu_put_byte(f, port->host_connected);
 
-	elem_popped = 0;
+        elem_popped = 0;
         if (port->elem) {
             elem_popped = 1;
         }
@@ -694,7 +708,7 @@ static void virtio_serial_save_device(VirtIODevice *vdev, QEMUFile *f)
         if (elem_popped) {
             qemu_put_be32s(f, &port->iov_idx);
             qemu_put_be64s(f, &port->iov_offset);
-            qemu_put_virtqueue_element(f, port->elem);
+            qemu_put_virtqueue_element(vdev, f, port->elem);
         }
     }
 }
@@ -798,7 +812,7 @@ static int virtio_serial_load_device(VirtIODevice *vdev, QEMUFile *f,
     qemu_get_be32s(f, &tmp);
 
     max_nr_ports = s->serial.max_virtserial_ports;
-    for (i = 0; i < (max_nr_ports + 31) / 32; i++) {
+    for (i = 0; i < DIV_ROUND_UP(max_nr_ports, 32); i++) {
         qemu_get_be32s(f, &ports_map);
 
         if (ports_map != s->ports_map[i]) {
@@ -863,7 +877,7 @@ static uint32_t find_free_port_id(VirtIOSerial *vser)
     unsigned int i, max_nr_ports;
 
     max_nr_ports = vser->serial.max_virtserial_ports;
-    for (i = 0; i < (max_nr_ports + 31) / 32; i++) {
+    for (i = 0; i < DIV_ROUND_UP(max_nr_ports, 32); i++) {
         uint32_t map, zeroes;
 
         map = vser->ports_map[i];
@@ -1042,7 +1056,7 @@ static void virtio_serial_device_realize(DeviceState *dev, Error **errp)
     /* Spawn a new virtio-serial bus on which the ports will ride as devices */
     qbus_create_inplace(&vser->bus, sizeof(vser->bus), TYPE_VIRTIO_SERIAL_BUS,
                         dev, vdev->bus_name);
-    qbus_set_hotplug_handler(BUS(&vser->bus), DEVICE(vser), errp);
+    qbus_set_hotplug_handler(BUS(&vser->bus), OBJECT(vser), errp);
     vser->bus.vser = vser;
     QTAILQ_INIT(&vser->ports);
 
@@ -1075,7 +1089,7 @@ static void virtio_serial_device_realize(DeviceState *dev, Error **errp)
         vser->ovqs[i] = virtio_add_queue(vdev, 128, handle_output);
     }
 
-    vser->ports_map = g_malloc0(((vser->serial.max_virtserial_ports + 31) / 32)
+    vser->ports_map = g_malloc0((DIV_ROUND_UP(vser->serial.max_virtserial_ports, 32))
         * sizeof(vser->ports_map[0]));
     /*
      * Reserve location 0 for a console port for backward compat

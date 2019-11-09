@@ -20,7 +20,7 @@
 #ifndef QEMU_MIPS_CPU_QOM_H
 #define QEMU_MIPS_CPU_QOM_H
 
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
 
 #ifdef TARGET_MIPS64
 #define TYPE_MIPS_CPU "mips64-cpu"
@@ -49,6 +49,7 @@ typedef struct MIPSCPUClass {
 
     DeviceRealize parent_realize;
     void (*parent_reset)(CPUState *cpu);
+    const struct mips_def_t *cpu_def;
 } MIPSCPUClass;
 
 typedef struct MIPSCPU MIPSCPU;

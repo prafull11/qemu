@@ -15,16 +15,16 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "hw/arm/fsl-imx31.h"
 #include "hw/boards.h"
 #include "qemu/error-report.h"
 #include "exec/address-spaces.h"
 #include "net/net.h"
-#include "hw/devices.h"
+#include "hw/net/lan9118.h"
 #include "hw/char/serial.h"
 #include "sysemu/qtest.h"
+#include "sysemu/sysemu.h"
 
 /* Memory map for Kzm Emulation Baseboard:
  * 0x00000000-0x7fffffff See i.MX31 SOC for support
@@ -71,9 +71,8 @@ static void kzm_init(MachineState *machine)
     unsigned int alias_offset;
     unsigned int i;
 
-    object_initialize(&s->soc, sizeof(s->soc), TYPE_FSL_IMX31);
-    object_property_add_child(OBJECT(machine), "soc", OBJECT(&s->soc),
-                              &error_abort);
+    object_initialize_child(OBJECT(machine), "soc", &s->soc, sizeof(s->soc),
+                            TYPE_FSL_IMX31, &error_abort, NULL);
 
     object_property_set_bool(OBJECT(&s->soc), true, "realized", &error_fatal);
 
@@ -121,20 +120,17 @@ static void kzm_init(MachineState *machine)
                      qdev_get_gpio_in(DEVICE(&s->soc.avic), 52));
     }
 
-    if (serial_hds[2]) { /* touchscreen */
+    if (serial_hd(2)) { /* touchscreen */
         serial_mm_init(get_system_memory(), KZM_FPGA_ADDR+0x10, 0,
                        qdev_get_gpio_in(DEVICE(&s->soc.avic), 52),
-                       14745600, serial_hds[2], DEVICE_NATIVE_ENDIAN);
+                       14745600, serial_hd(2), DEVICE_NATIVE_ENDIAN);
     }
 
     kzm_binfo.ram_size = machine->ram_size;
-    kzm_binfo.kernel_filename = machine->kernel_filename;
-    kzm_binfo.kernel_cmdline = machine->kernel_cmdline;
-    kzm_binfo.initrd_filename = machine->initrd_filename;
     kzm_binfo.nb_cpus = 1;
 
     if (!qtest_enabled()) {
-        arm_load_kernel(&s->soc.cpu, &kzm_binfo);
+        arm_load_kernel(&s->soc.cpu, machine, &kzm_binfo);
     }
 }
 
@@ -142,6 +138,7 @@ static void kzm_machine_init(MachineClass *mc)
 {
     mc->desc = "ARM KZM Emulation Baseboard (ARM1136)";
     mc->init = kzm_init;
+    mc->ignore_memory_transaction_failures = true;
 }
 
 DEFINE_MACHINE("kzm", kzm_machine_init)

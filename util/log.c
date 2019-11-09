@@ -18,7 +18,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "qemu/log.h"
 #include "qemu/range.h"
 #include "qemu/error-report.h"
@@ -256,6 +255,8 @@ const QEMULogItem qemu_log_items[] = {
       "show trace before each executed TB (lots of logs)" },
     { CPU_LOG_TB_CPU, "cpu",
       "show CPU registers before entering a TB (lots of logs)" },
+    { CPU_LOG_TB_FPU, "fpu",
+      "include FPU registers in the 'cpu' logging" },
     { CPU_LOG_MMU, "mmu",
       "log MMU-related activities" },
     { CPU_LOG_PCALL, "pcall",
@@ -272,6 +273,9 @@ const QEMULogItem qemu_log_items[] = {
     { CPU_LOG_TB_NOCHAIN, "nochain",
       "do not chain compiled TBs so that \"exec\" and \"cpu\" show\n"
       "complete traces" },
+#ifdef CONFIG_PLUGIN
+    { CPU_LOG_PLUGIN, "plugin", "output from TCG plugins\n"},
+#endif
     { 0, NULL, NULL },
 };
 

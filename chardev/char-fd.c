@@ -21,10 +21,12 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
+#include "qemu-common.h"
+#include "qemu/module.h"
 #include "qemu/sockets.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "chardev/char.h"
 #include "io/channel-file.h"
 
@@ -84,8 +86,7 @@ static GSource *fd_chr_add_watch(Chardev *chr, GIOCondition cond)
     return qio_channel_create_watch(s->ioc_out, cond);
 }
 
-static void fd_chr_update_read_handler(Chardev *chr,
-                                       GMainContext *context)
+static void fd_chr_update_read_handler(Chardev *chr)
 {
     FDChardev *s = FD_CHARDEV(chr);
 
@@ -94,7 +95,7 @@ static void fd_chr_update_read_handler(Chardev *chr,
         chr->gsource = io_add_watch_poll(chr, s->ioc_in,
                                            fd_chr_read_poll,
                                            fd_chr_read, chr,
-                                           context);
+                                           chr->gcontext);
     }
 }
 

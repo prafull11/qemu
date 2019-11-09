@@ -12,10 +12,7 @@
 #include "qemu/osdep.h"
 #include "net/filter.h"
 #include "net/net.h"
-#include "qemu-common.h"
 #include "qapi/error.h"
-#include "qapi/qmp/qerror.h"
-#include "qapi-visit.h"
 #include "qom/object.h"
 #include "qemu/main-loop.h"
 #include "qemu/error-report.h"
@@ -212,6 +209,12 @@ static void filter_mirror_setup(NetFilterState *nf, Error **errp)
 {
     MirrorState *s = FILTER_MIRROR(nf);
     Chardev *chr;
+
+    if (s->outdev == NULL) {
+        error_set(errp, ERROR_CLASS_DEVICE_NOT_FOUND, "filter-mirror parameter"\
+                  " 'outdev' cannot be empty");
+        return;
+    }
 
     chr = qemu_chr_find(s->outdev);
     if (chr == NULL) {

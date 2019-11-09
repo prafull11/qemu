@@ -7,31 +7,37 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
  */
+
 #include "qemu/osdep.h"
 #include <getopt.h>
 #include <libgen.h>
+#ifndef _WIN32
+#include <termios.h>
+#endif
 
+#include "qemu-common.h"
 #include "qapi/error.h"
 #include "qemu-io.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
+#include "qemu/module.h"
 #include "qemu/option.h"
 #include "qemu/config-file.h"
 #include "qemu/readline.h"
 #include "qemu/log.h"
 #include "qapi/qmp/qstring.h"
-#include "qapi/qmp/qbool.h"
+#include "qapi/qmp/qdict.h"
 #include "qom/object_interfaces.h"
 #include "sysemu/block-backend.h"
 #include "block/block_int.h"
 #include "trace/control.h"
 #include "crypto/init.h"
+#include "qemu-version.h"
 
 #define CMD_NOFILE_OK   0x01
 
-static char *progname;
-
 static BlockBackend *qemuio_blk;
+static bool quit_qemu_io;
 
 /* qemu-io commands passed using -c */
 static int ncmdline;
@@ -39,6 +45,26 @@ static char **cmdline;
 static bool imageOpts;
 
 static ReadLineState *readline_state;
+
+static int ttyEOF;
+
+static int get_eof_char(void)
+{
+#ifdef _WIN32
+    return 0x4; /* Ctrl-D */
+#else
+    struct termios tty;
+    if (tcgetattr(STDIN_FILENO, &tty) != 0) {
+        if (errno == ENOTTY) {
+            return 0x0; /* just expect read() == 0 */
+        } else {
+            return 0x4; /* Ctrl-D */
+        }
+    }
+
+    return tty.c_cc[VEOF];
+#endif
+}
 
 static int close_f(BlockBackend *blk, int argc, char **argv)
 {
@@ -61,7 +87,7 @@ static int openfile(char *name, int flags, bool writethrough, bool force_share,
 
     if (qemuio_blk) {
         error_report("file open already, try 'help close'");
-        QDECREF(opts);
+        qobject_unref(opts);
         return 1;
     }
 
@@ -70,12 +96,12 @@ static int openfile(char *name, int flags, bool writethrough, bool force_share,
             opts = qdict_new();
         }
         if (qdict_haskey(opts, BDRV_OPT_FORCE_SHARE)
-            && !qdict_get_bool(opts, BDRV_OPT_FORCE_SHARE)) {
+            && strcmp(qdict_get_str(opts, BDRV_OPT_FORCE_SHARE), "on")) {
             error_report("-U conflicts with image options");
-            QDECREF(opts);
+            qobject_unref(opts);
             return 1;
         }
-        qdict_put_bool(opts, BDRV_OPT_FORCE_SHARE, true);
+        qdict_put_str(opts, BDRV_OPT_FORCE_SHARE, "on");
     }
     qemuio_blk = blk_new_open(name, NULL, opts, flags, &local_err);
     if (!qemuio_blk) {
@@ -101,6 +127,7 @@ static void open_help(void)
 " Opens a file for subsequent use by all of the other qemu-io commands.\n"
 " -r, -- open file read-only\n"
 " -s, -- use snapshot file\n"
+" -C, -- use copy-on-read\n"
 " -n, -- disable host cache, short for -t none\n"
 " -U, -- force shared permissions\n"
 " -k, -- use kernel AIO implementation (on Linux only)\n"
@@ -119,7 +146,7 @@ static const cmdinfo_t open_cmd = {
     .argmin     = 1,
     .argmax     = -1,
     .flags      = CMD_NOFILE_OK,
-    .args       = "[-rsnkU] [-t cache] [-d discard] [-o options] [path]",
+    .args       = "[-rsCnkU] [-t cache] [-d discard] [-o options] [path]",
     .oneline    = "open the file specified by path",
     .help       = open_help,
 };
@@ -140,11 +167,12 @@ static int open_f(BlockBackend *blk, int argc, char **argv)
     int readonly = 0;
     bool writethrough = true;
     int c;
+    int ret;
     QemuOpts *qopts;
     QDict *opts;
     bool force_share = false;
 
-    while ((c = getopt(argc, argv, "snro:kt:d:U")) != -1) {
+    while ((c = getopt(argc, argv, "snCro:kt:d:U")) != -1) {
         switch (c) {
         case 's':
             flags |= BDRV_O_SNAPSHOT;
@@ -152,6 +180,9 @@ static int open_f(BlockBackend *blk, int argc, char **argv)
         case 'n':
             flags |= BDRV_O_NOCACHE;
             writethrough = false;
+            break;
+        case 'C':
+            flags |= BDRV_O_COPY_ON_READ;
             break;
         case 'r':
             readonly = 1;
@@ -163,25 +194,25 @@ static int open_f(BlockBackend *blk, int argc, char **argv)
             if (bdrv_parse_cache_mode(optarg, &flags, &writethrough) < 0) {
                 error_report("Invalid cache option: %s", optarg);
                 qemu_opts_reset(&empty_opts);
-                return 0;
+                return -EINVAL;
             }
             break;
         case 'd':
             if (bdrv_parse_discard_flags(optarg, &flags) < 0) {
                 error_report("Invalid discard option: %s", optarg);
                 qemu_opts_reset(&empty_opts);
-                return 0;
+                return -EINVAL;
             }
             break;
         case 'o':
             if (imageOpts) {
                 printf("--image-opts and 'open -o' are mutually exclusive\n");
                 qemu_opts_reset(&empty_opts);
-                return 0;
+                return -EINVAL;
             }
             if (!qemu_opts_parse_noisily(&empty_opts, optarg, false)) {
                 qemu_opts_reset(&empty_opts);
-                return 0;
+                return -EINVAL;
             }
             break;
         case 'U':
@@ -189,7 +220,8 @@ static int open_f(BlockBackend *blk, int argc, char **argv)
             break;
         default:
             qemu_opts_reset(&empty_opts);
-            return qemuio_command_usage(&open_cmd);
+            qemuio_command_usage(&open_cmd);
+            return -EINVAL;
         }
     }
 
@@ -200,7 +232,7 @@ static int open_f(BlockBackend *blk, int argc, char **argv)
     if (imageOpts && (optind == argc - 1)) {
         if (!qemu_opts_parse_noisily(&empty_opts, argv[optind], false)) {
             qemu_opts_reset(&empty_opts);
-            return 0;
+            return -EINVAL;
         }
         optind++;
     }
@@ -210,19 +242,26 @@ static int open_f(BlockBackend *blk, int argc, char **argv)
     qemu_opts_reset(&empty_opts);
 
     if (optind == argc - 1) {
-        openfile(argv[optind], flags, writethrough, force_share, opts);
+        ret = openfile(argv[optind], flags, writethrough, force_share, opts);
     } else if (optind == argc) {
-        openfile(NULL, flags, writethrough, force_share, opts);
+        ret = openfile(NULL, flags, writethrough, force_share, opts);
     } else {
-        QDECREF(opts);
+        qobject_unref(opts);
         qemuio_command_usage(&open_cmd);
+        return -EINVAL;
     }
+
+    if (ret) {
+        return -EINVAL;
+    }
+
     return 0;
 }
 
 static int quit_f(BlockBackend *blk, int argc, char **argv)
 {
-    return 1;
+    quit_qemu_io = true;
+    return 0;
 }
 
 static const cmdinfo_t quit_cmd = {
@@ -250,6 +289,7 @@ static void usage(const char *name)
 "  -r, --read-only      export read-only\n"
 "  -s, --snapshot       use snapshot file\n"
 "  -n, --nocache        disable host cache, short for -t none\n"
+"  -C, --copy-on-read   enable copy-on-read\n"
 "  -m, --misalign       misalign allocations for O_DIRECT\n"
 "  -k, --native-aio     use kernel AIO implementation (on Linux only)\n"
 "  -t, --cache=MODE     use the given cache mode for the image\n"
@@ -261,8 +301,9 @@ static void usage(const char *name)
 "  -h, --help           display this help and exit\n"
 "  -V, --version        output version information and exit\n"
 "\n"
-"See '%s -c help' for information on available commands."
-"\n",
+"See '%s -c help' for information on available commands.\n"
+"\n"
+QEMU_HELP_BOTTOM "\n",
     name, name);
 }
 
@@ -271,7 +312,7 @@ static char *get_prompt(void)
     static char prompt[FILENAME_MAX + 2 /*"> "*/ + 1 /*"\0"*/ ];
 
     if (!prompt[0]) {
-        snprintf(prompt, sizeof(prompt), "%s> ", progname);
+        snprintf(prompt, sizeof(prompt), "%s> ", error_get_progname());
     }
 
     return prompt;
@@ -315,7 +356,8 @@ static char *fetchline_readline(void)
     readline_start(readline_state, get_prompt(), 0, readline_func, &line);
     while (!line) {
         int ch = getchar();
-        if (ch == EOF) {
+        if (ttyEOF != 0x0 && ch == ttyEOF) {
+            printf("\n");
             break;
         }
         readline_handle_byte(readline_state, ch);
@@ -358,20 +400,24 @@ static void prep_fetchline(void *opaque)
     *fetchable= 1;
 }
 
-static void command_loop(void)
+static int command_loop(void)
 {
-    int i, done = 0, fetchable = 0, prompted = 0;
+    int i, fetchable = 0, prompted = 0;
+    int ret, last_error = 0;
     char *input;
 
-    for (i = 0; !done && i < ncmdline; i++) {
-        done = qemuio_command(qemuio_blk, cmdline[i]);
+    for (i = 0; !quit_qemu_io && i < ncmdline; i++) {
+        ret = qemuio_command(qemuio_blk, cmdline[i]);
+        if (ret < 0) {
+            last_error = ret;
+        }
     }
     if (cmdline) {
         g_free(cmdline);
-        return;
+        return last_error;
     }
 
-    while (!done) {
+    while (!quit_qemu_io) {
         if (!prompted) {
             printf("%s", get_prompt());
             fflush(stdout);
@@ -389,13 +435,19 @@ static void command_loop(void)
         if (input == NULL) {
             break;
         }
-        done = qemuio_command(qemuio_blk, input);
+        ret = qemuio_command(qemuio_blk, input);
         g_free(input);
+
+        if (ret < 0) {
+            last_error = ret;
+        }
 
         prompted = 0;
         fetchable = 0;
     }
     qemu_set_fd_handler(STDIN_FILENO, NULL, NULL, NULL);
+
+    return last_error;
 }
 
 static void add_user_command(char *optarg)
@@ -423,6 +475,13 @@ static QemuOptsList qemu_object_opts = {
     },
 };
 
+static bool qemu_io_object_print_help(const char *type, QemuOpts *opts)
+{
+    if (user_creatable_print_help(type, opts)) {
+        exit(0);
+    }
+    return true;
+}
 
 static QemuOptsList file_opts = {
     .name = "file",
@@ -437,7 +496,7 @@ static QemuOptsList file_opts = {
 int main(int argc, char **argv)
 {
     int readonly = 0;
-    const char *sopt = "hVc:d:f:rsnmkt:T:U";
+    const char *sopt = "hVc:d:f:rsnCmkt:T:U";
     const struct option lopt[] = {
         { "help", no_argument, NULL, 'h' },
         { "version", no_argument, NULL, 'V' },
@@ -446,6 +505,7 @@ int main(int argc, char **argv)
         { "read-only", no_argument, NULL, 'r' },
         { "snapshot", no_argument, NULL, 's' },
         { "nocache", no_argument, NULL, 'n' },
+        { "copy-on-read", no_argument, NULL, 'C' },
         { "misalign", no_argument, NULL, 'm' },
         { "native-aio", no_argument, NULL, 'k' },
         { "discard", required_argument, NULL, 'd' },
@@ -459,6 +519,7 @@ int main(int argc, char **argv)
     int c;
     int opt_index = 0;
     int flags = BDRV_O_UNMAP;
+    int ret;
     bool writethrough = true;
     Error *local_error = NULL;
     QDict *opts = NULL;
@@ -470,8 +531,8 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 #endif
 
+    error_init(argv[0]);
     module_call_init(MODULE_INIT_TRACE);
-    progname = basename(argv[0]);
     qemu_init_exec_dir(argv[0]);
 
     qcrypto_init(&error_fatal);
@@ -489,6 +550,9 @@ int main(int argc, char **argv)
         case 'n':
             flags |= BDRV_O_NOCACHE;
             writethrough = false;
+            break;
+        case 'C':
+            flags |= BDRV_O_COPY_ON_READ;
             break;
         case 'd':
             if (bdrv_parse_discard_flags(optarg, &flags) < 0) {
@@ -522,10 +586,11 @@ int main(int argc, char **argv)
             trace_file = trace_opt_parse(optarg);
             break;
         case 'V':
-            printf("%s version %s\n", progname, QEMU_VERSION);
+            printf("%s version " QEMU_FULL_VERSION "\n"
+                   QEMU_COPYRIGHT "\n", error_get_progname());
             exit(0);
         case 'h':
-            usage(progname);
+            usage(error_get_progname());
             exit(0);
         case 'U':
             force_share = true;
@@ -542,13 +607,13 @@ int main(int argc, char **argv)
             imageOpts = true;
             break;
         default:
-            usage(progname);
+            usage(error_get_progname());
             exit(1);
         }
     }
 
     if ((argc - optind) > 1) {
-        usage(progname);
+        usage(error_get_progname());
         exit(1);
     }
 
@@ -562,11 +627,9 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    if (qemu_opts_foreach(&qemu_object_opts,
-                          user_creatable_add_opts_foreach,
-                          NULL, NULL)) {
-        exit(1);
-    }
+    qemu_opts_foreach(&qemu_object_opts,
+                      user_creatable_add_opts_foreach,
+                      qemu_io_object_print_help, &error_fatal);
 
     if (!trace_init_backends()) {
         exit(1);
@@ -580,6 +643,7 @@ int main(int argc, char **argv)
     qemuio_add_command(&close_cmd);
 
     if (isatty(STDIN_FILENO)) {
+        ttyEOF = get_eof_char();
         readline_state = readline_init(readline_printf_func,
                                        readline_flush_func,
                                        NULL,
@@ -615,7 +679,7 @@ int main(int argc, char **argv)
             }
         }
     }
-    command_loop();
+    ret = command_loop();
 
     /*
      * Make sure all outstanding requests complete before the program exits.
@@ -624,5 +688,10 @@ int main(int argc, char **argv)
 
     blk_unref(qemuio_blk);
     g_free(readline_state);
-    return 0;
+
+    if (ret < 0) {
+        return 1;
+    } else {
+        return 0;
+    }
 }

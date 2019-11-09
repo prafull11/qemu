@@ -20,6 +20,7 @@
 static int verbose;
 
 static const char *hmp_cmds[] = {
+    "announce_self",
     "boot_set ndc",
     "chardev-add null,id=testchardev1",
     "chardev-send-break testchardev1",
@@ -30,16 +31,17 @@ static const char *hmp_cmds[] = {
     "cpu 0",
     "device_add ?",
     "device_add usb-mouse,id=mouse1",
+    "drive_add ignored format=help",
     "mouse_button 7",
     "mouse_move 10 10",
     "mouse_button 0",
     "device_del mouse1",
     "dump-guest-memory /dev/null 0 4096",
+    "dump-guest-memory /dev/null",
     "gdbserver",
-    "host_net_add user id=net0",
+    "gva2gpa 0",
     "hostfwd_add tcp::43210-:43210",
     "hostfwd_remove tcp::43210-:43210",
-    "host_net_remove 0 net0",
     "i /w 0",
     "log all",
     "log none",
@@ -71,27 +73,30 @@ static const char *hmp_cmds[] = {
 };
 
 /* Run through the list of pre-defined commands */
-static void test_commands(void)
+static void test_commands(QTestState *qts)
 {
     char *response;
     int i;
 
     for (i = 0; hmp_cmds[i] != NULL; i++) {
+        response = qtest_hmp(qts, "%s", hmp_cmds[i]);
         if (verbose) {
-            fprintf(stderr, "\t%s\n", hmp_cmds[i]);
+            fprintf(stderr,
+                    "\texecute HMP command: %s\n"
+                    "\tresult             : %s\n",
+                    hmp_cmds[i], response);
         }
-        response = hmp(hmp_cmds[i]);
         g_free(response);
     }
 
 }
 
 /* Run through all info commands and call them blindly (without arguments) */
-static void test_info_commands(void)
+static void test_info_commands(QTestState *qts)
 {
     char *resp, *info, *info_buf, *endp;
 
-    info_buf = info = hmp("help info");
+    info_buf = info = qtest_hmp(qts, "help info");
 
     while (*info) {
         /* Extract the info command, ignore parameters and description */
@@ -103,7 +108,7 @@ static void test_info_commands(void)
         if (verbose) {
             fprintf(stderr, "\t%s\n", info);
         }
-        resp = hmp(info);
+        resp = qtest_hmp(qts, "%s", info);
         g_free(resp);
         /* And move forward to the next line */
         info = strchr(endp + 1, '\n');
@@ -120,14 +125,15 @@ static void test_machine(gconstpointer data)
 {
     const char *machine = data;
     char *args;
+    QTestState *qts;
 
     args = g_strdup_printf("-S -M %s", machine);
-    qtest_start(args);
+    qts = qtest_init(args);
 
-    test_info_commands();
-    test_commands();
+    test_info_commands(qts);
+    test_commands(qts);
 
-    qtest_end();
+    qtest_quit(qts);
     g_free(args);
     g_free((void *)data);
 }
@@ -137,8 +143,7 @@ static void add_machine_test_case(const char *mname)
     char *path;
 
     /* Ignore blacklisted machines that have known problems */
-    if (!strcmp("puv3", mname) || !strcmp("tricore_testboard", mname) ||
-        !strcmp("xenfv", mname) || !strcmp("xenpv", mname)) {
+    if (!strcmp("xenfv", mname) || !strcmp("xenpv", mname)) {
         return;
     }
 
@@ -157,7 +162,10 @@ int main(int argc, char **argv)
 
     g_test_init(&argc, &argv, NULL);
 
-    qtest_cb_for_every_machine(add_machine_test_case);
+    qtest_cb_for_every_machine(add_machine_test_case, g_test_quick());
+
+    /* as none machine has no memory by default, add a test case with memory */
+    qtest_add_data_func("hmp/none+2MB", g_strdup("none -m 2"), test_machine);
 
     return g_test_run();
 }

@@ -31,9 +31,10 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/isa/isa.h"
+#include "hw/qdev-properties.h"
 #include "ui/console.h"
+#include "qemu/module.h"
 #include "qemu/timer.h"
 
 /* #define DEBUG_SMC */
@@ -331,7 +332,7 @@ static void applesmc_isa_realize(DeviceState *dev, Error **errp)
                         s->iobase + APPLESMC_ERR_PORT);
 
     if (!s->osk || (strlen(s->osk) != 64)) {
-        fprintf(stderr, "WARNING: Using AppleSMC with invalid key\n");
+        warn_report("Using AppleSMC with invalid key");
         s->osk = default_osk;
     }
 

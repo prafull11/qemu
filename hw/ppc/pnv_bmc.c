@@ -17,10 +17,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
-#include "sysemu/sysemu.h"
 #include "target/ppc/cpu.h"
-#include "qapi/error.h"
 #include "qemu/log.h"
 #include "hw/ipmi/ipmi.h"
 #include "hw/ppc/fdt.h"
@@ -73,20 +70,17 @@ void pnv_bmc_powerdown(IPMIBmc *bmc)
     pnv_gen_oem_sel(bmc, SOFT_OFF);
 }
 
-void pnv_bmc_populate_sensors(IPMIBmc *bmc, void *fdt)
+void pnv_dt_bmc_sensors(IPMIBmc *bmc, void *fdt)
 {
     int offset;
     int i;
     const struct ipmi_sdr_compact *sdr;
     uint16_t nextrec;
 
-    offset = fdt_add_subnode(fdt, 0, "/bmc");
+    offset = fdt_add_subnode(fdt, 0, "bmc");
     _FDT(offset);
 
     _FDT((fdt_setprop_string(fdt, offset, "name", "bmc")));
-    _FDT((fdt_setprop_cell(fdt, offset, "#address-cells", 0x1)));
-    _FDT((fdt_setprop_cell(fdt, offset, "#size-cells", 0x0)));
-
     offset = fdt_add_subnode(fdt, offset, "sensors");
     _FDT(offset);
 

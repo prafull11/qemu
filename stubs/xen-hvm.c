@@ -9,10 +9,9 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "hw/xen/xen.h"
 #include "exec/memory.h"
-#include "qmp-commands.h"
+#include "qapi/qapi-commands-misc.h"
 
 int xen_pci_slot_get_pirq(PCIDevice *pci_dev, int irq_num)
 {
