@@ -39,7 +39,7 @@ of other UNIX targets. The simple steps to build QEMU are:
 
   mkdir build
   cd build
-  ../configure
+  ../configure --enable-gcrypt
   make
 
 Additional information can also be found online via the QEMU website:
@@ -124,7 +124,15 @@ yum install gcc
 yum install zlib-devel
 yum install gtk2-devel
 yum install bison flex
+yum install libgcrypt-devel
+
+centos 7
+========
 yum install librbd1-devel
+
+centos 8
+========
+dnf --enablerepo=powertools install librbd-devel
 
 git submodule update --init dtc
 git submodule update --init pixman
