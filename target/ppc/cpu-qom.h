@@ -21,6 +21,7 @@
 #define QEMU_PPC_CPU_QOM_H
 
 #include "hw/core/cpu.h"
+#include "qom/object.h"
 
 #ifdef TARGET_PPC64
 #define TYPE_POWERPC_CPU "powerpc64-cpu"
@@ -28,14 +29,9 @@
 #define TYPE_POWERPC_CPU "powerpc-cpu"
 #endif
 
-#define POWERPC_CPU_CLASS(klass) \
-    OBJECT_CLASS_CHECK(PowerPCCPUClass, (klass), TYPE_POWERPC_CPU)
-#define POWERPC_CPU(obj) \
-    OBJECT_CHECK(PowerPCCPU, (obj), TYPE_POWERPC_CPU)
-#define POWERPC_CPU_GET_CLASS(obj) \
-    OBJECT_GET_CLASS(PowerPCCPUClass, (obj), TYPE_POWERPC_CPU)
+OBJECT_DECLARE_TYPE(PowerPCCPU, PowerPCCPUClass,
+                    POWERPC_CPU)
 
-typedef struct PowerPCCPU PowerPCCPU;
 typedef struct CPUPPCState CPUPPCState;
 typedef struct ppc_tb_t ppc_tb_t;
 typedef struct ppc_dcr_t ppc_dcr_t;
@@ -78,6 +74,11 @@ enum powerpc_mmu_t {
     POWERPC_MMU_3_00       = POWERPC_MMU_64 | 0x00000005,
 };
 
+static inline bool mmu_is_64bit(powerpc_mmu_t mmu_model)
+{
+    return mmu_model & POWERPC_MMU_64;
+}
+
 /*****************************************************************************/
 /* Exception model                                                           */
 typedef enum powerpc_excp_t powerpc_excp_t;
@@ -115,6 +116,8 @@ enum powerpc_excp_t {
     POWERPC_EXCP_POWER8,
     /* POWER9 exception model           */
     POWERPC_EXCP_POWER9,
+    /* POWER10 exception model           */
+    POWERPC_EXCP_POWER10,
 };
 
 /*****************************************************************************/
@@ -159,14 +162,14 @@ typedef struct PPCHash64Options PPCHash64Options;
  *
  * A PowerPC CPU model.
  */
-typedef struct PowerPCCPUClass {
+struct PowerPCCPUClass {
     /*< private >*/
     CPUClass parent_class;
     /*< public >*/
 
     DeviceRealize parent_realize;
     DeviceUnrealize parent_unrealize;
-    void (*parent_reset)(CPUState *cpu);
+    DeviceReset parent_reset;
     void (*parent_parse_features)(const char *type, char *str, Error **errp);
 
     uint32_t pvr;
@@ -177,6 +180,7 @@ typedef struct PowerPCCPUClass {
     uint64_t insns_flags;
     uint64_t insns_flags2;
     uint64_t msr_mask;
+    uint64_t lpcr_mask;         /* Available bits in the LPCR */
     uint64_t lpcr_pm;           /* Power-saving mode Exit Cause Enable bits */
     powerpc_mmu_t   mmu_model;
     powerpc_excp_t  excp_model;
@@ -196,7 +200,7 @@ typedef struct PowerPCCPUClass {
     int  (*check_pow)(CPUPPCState *env);
     int (*handle_mmu_fault)(PowerPCCPU *cpu, vaddr eaddr, int rwx, int mmu_idx);
     bool (*interrupts_big_endian)(PowerPCCPU *cpu);
-} PowerPCCPUClass;
+};
 
 #ifndef CONFIG_USER_ONLY
 typedef struct PPCTimebase {
@@ -216,7 +220,7 @@ extern const VMStateDescription vmstate_ppc_timebase;
     .offset     = vmstate_offset_value(_state, _field, PPCTimebase),  \
 }
 
-void cpu_ppc_clock_vm_state_change(void *opaque, int running,
+void cpu_ppc_clock_vm_state_change(void *opaque, bool running,
                                    RunState state);
 #endif
 

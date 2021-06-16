@@ -192,10 +192,9 @@ qcrypto_tls_creds_psk_prop_set_loaded(Object *obj,
 {
     QCryptoTLSCredsPSK *creds = QCRYPTO_TLS_CREDS_PSK(obj);
 
+    qcrypto_tls_creds_psk_unload(creds);
     if (value) {
         qcrypto_tls_creds_psk_load(creds, errp);
-    } else {
-        qcrypto_tls_creds_psk_unload(creds);
     }
 }
 
@@ -234,7 +233,7 @@ qcrypto_tls_creds_psk_prop_get_loaded(Object *obj G_GNUC_UNUSED,
 static void
 qcrypto_tls_creds_psk_complete(UserCreatable *uc, Error **errp)
 {
-    object_property_set_bool(OBJECT(uc), true, "loaded", errp);
+    object_property_set_bool(OBJECT(uc), "loaded", true, errp);
 }
 
 
@@ -275,12 +274,10 @@ qcrypto_tls_creds_psk_class_init(ObjectClass *oc, void *data)
 
     object_class_property_add_bool(oc, "loaded",
                                    qcrypto_tls_creds_psk_prop_get_loaded,
-                                   qcrypto_tls_creds_psk_prop_set_loaded,
-                                   NULL);
+                                   qcrypto_tls_creds_psk_prop_set_loaded);
     object_class_property_add_str(oc, "username",
                                   qcrypto_tls_creds_psk_prop_get_username,
-                                  qcrypto_tls_creds_psk_prop_set_username,
-                                  NULL);
+                                  qcrypto_tls_creds_psk_prop_set_username);
 }
 
 

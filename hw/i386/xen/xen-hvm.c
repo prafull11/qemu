@@ -9,27 +9,30 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 
 #include "cpu.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
 #include "hw/i386/pc.h"
+#include "hw/southbridge/piix.h"
 #include "hw/irq.h"
 #include "hw/hw.h"
 #include "hw/i386/apic-msidef.h"
 #include "hw/xen/xen_common.h"
 #include "hw/xen/xen-legacy-backend.h"
 #include "hw/xen/xen-bus.h"
+#include "hw/xen/xen-x86.h"
 #include "qapi/error.h"
-#include "qapi/qapi-commands-misc.h"
+#include "qapi/qapi-commands-migration.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "qemu/range.h"
 #include "sysemu/runstate.h"
 #include "sysemu/sysemu.h"
+#include "sysemu/xen.h"
 #include "sysemu/xen-mapcache.h"
 #include "trace.h"
-#include "exec/address-spaces.h"
 
 #include <xen/hvm/ioreq.h>
 #include <xen/hvm/e820.h>
@@ -105,6 +108,7 @@ typedef struct XenIOState {
     shared_iopage_t *shared_page;
     shared_vmport_iopage_t *shared_vmport_page;
     buffered_iopage_t *buffered_io_page;
+    xenforeignmemory_resource_handle *fres;
     QEMUTimer *buffered_io_timer;
     CPUState **cpu_by_vcpu_id;
     /* the evtchn port for polling the notification, */
@@ -136,7 +140,7 @@ typedef struct XenIOState {
 
 int xen_pci_slot_get_pirq(PCIDevice *pci_dev, int irq_num)
 {
-    return irq_num + ((pci_dev->devfn >> 3) << 2);
+    return irq_num + (PCI_SLOT(pci_dev->devfn) << 2);
 }
 
 void xen_piix3_set_irq(void *opaque, int irq_num, int level)
@@ -156,8 +160,8 @@ void xen_piix_pci_write_config_client(uint32_t address, uint32_t val, int len)
             v = 0;
         }
         v &= 0xf;
-        if (((address + i) >= 0x60) && ((address + i) <= 0x63)) {
-            xen_set_pci_link_route(xen_domid, address + i - 0x60, v);
+        if (((address + i) >= PIIX_PIRQCA) && ((address + i) <= PIIX_PIRQCD)) {
+            xen_set_pci_link_route(xen_domid, address + i - PIIX_PIRQCA, v);
         }
     }
 }
@@ -202,7 +206,7 @@ static void xen_ram_init(PCMachineState *pcms,
     ram_addr_t block_len;
     uint64_t user_lowmem =
         object_property_get_uint(qdev_get_machine(),
-                                 X86_MACHINE_MAX_RAM_BELOW_4G,
+                                 PC_MACHINE_MAX_RAM_BELOW_4G,
                                  &error_abort);
 
     /* Handle the machine opt max-ram-below-4g.  It is basically doing
@@ -229,7 +233,7 @@ static void xen_ram_init(PCMachineState *pcms,
          * Xen does not allocate the memory continuously, it keeps a
          * hole of the size computed above or passed in.
          */
-        block_len = (1ULL << 32) + x86ms->above_4g_mem_size;
+        block_len = (4 * GiB) + x86ms->above_4g_mem_size;
     }
     memory_region_init_ram(&ram_memory, NULL, "xen.ram", block_len,
                            &error_fatal);
@@ -1137,7 +1141,7 @@ static int handle_buffered_iopage(XenIOState *state)
         assert(req.dir == IOREQ_WRITE);
         assert(!req.data_is_ptr);
 
-        atomic_add(&buf_page->read_pointer, qw + 1);
+        qatomic_add(&buf_page->read_pointer, qw + 1);
     }
 
     return req.count;
@@ -1231,7 +1235,7 @@ static void xen_main_loop_prepare(XenIOState *state)
 }
 
 
-static void xen_hvm_change_state_handler(void *opaque, int running,
+static void xen_hvm_change_state_handler(void *opaque, bool running,
                                          RunState rstate)
 {
     XenIOState *state = opaque;
@@ -1250,6 +1254,9 @@ static void xen_exit_notifier(Notifier *n, void *data)
     XenIOState *state = container_of(n, XenIOState, exit);
 
     xen_destroy_ioreq_server(xen_domid, state->ioservid);
+    if (state->fres != NULL) {
+        xenforeignmemory_unmap_resource(xen_fmem, state->fres);
+    }
 
     xenevtchn_close(state->xce_handle);
     xs_daemon_close(state->xenstore);
@@ -1317,7 +1324,6 @@ static void xen_wakeup_notifier(Notifier *notifier, void *data)
 static int xen_map_ioreq_server(XenIOState *state)
 {
     void *addr = NULL;
-    xenforeignmemory_resource_handle *fres;
     xen_pfn_t ioreq_pfn;
     xen_pfn_t bufioreq_pfn;
     evtchn_port_t bufioreq_evtchn;
@@ -1329,12 +1335,12 @@ static int xen_map_ioreq_server(XenIOState *state)
      */
     QEMU_BUILD_BUG_ON(XENMEM_resource_ioreq_server_frame_bufioreq != 0);
     QEMU_BUILD_BUG_ON(XENMEM_resource_ioreq_server_frame_ioreq(0) != 1);
-    fres = xenforeignmemory_map_resource(xen_fmem, xen_domid,
+    state->fres = xenforeignmemory_map_resource(xen_fmem, xen_domid,
                                          XENMEM_resource_ioreq_server,
                                          state->ioservid, 0, 2,
                                          &addr,
                                          PROT_READ | PROT_WRITE, 0);
-    if (fres != NULL) {
+    if (state->fres != NULL) {
         trace_xen_map_resource_ioreq(state->ioservid, addr);
         state->buffered_io_page = addr;
         state->shared_page = addr + TARGET_PAGE_SIZE;
@@ -1392,7 +1398,7 @@ static int xen_map_ioreq_server(XenIOState *state)
     return 0;
 }
 
-void xen_hvm_init(PCMachineState *pcms, MemoryRegion **ram_memory)
+void xen_hvm_init_pc(PCMachineState *pcms, MemoryRegion **ram_memory)
 {
     MachineState *ms = MACHINE(pcms);
     unsigned int max_cpus = ms->smp.max_cpus;
@@ -1489,7 +1495,7 @@ void xen_hvm_init(PCMachineState *pcms, MemoryRegion **ram_memory)
 #else
     xen_map_cache_init(NULL, state);
 #endif
-    xen_ram_init(pcms, ram_size, ram_memory);
+    xen_ram_init(pcms, ms->ram_size, ram_memory);
 
     qemu_add_vm_change_state_handler(xen_hvm_change_state_handler, state);
 

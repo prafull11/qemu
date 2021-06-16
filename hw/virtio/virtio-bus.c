@@ -69,6 +69,11 @@ void virtio_bus_device_plugged(VirtIODevice *vdev, Error **errp)
         return;
     }
 
+    if (has_iommu && !virtio_host_has_feature(vdev, VIRTIO_F_IOMMU_PLATFORM)) {
+        error_setg(errp, "iommu_platform=true is not supported by the device");
+        return;
+    }
+
     if (klass->device_plugged != NULL) {
         klass->device_plugged(qbus->parent, &local_err);
     }
@@ -286,6 +291,10 @@ int virtio_bus_set_host_notifier(VirtioBusState *bus, int n, bool assign)
         }
     } else {
         k->ioeventfd_assign(proxy, notifier, n, false);
+    }
+
+    if (r == 0) {
+        virtio_queue_set_host_notifier_enabled(vq, assign);
     }
 
     return r;

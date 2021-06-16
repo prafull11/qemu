@@ -9,7 +9,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "cpu.h"
 #include <sys/ioctl.h>
 #include <linux/vfio.h>
 
@@ -147,7 +146,7 @@ int vfio_spapr_create_window(VFIOContainer *container,
 {
     int ret = 0;
     IOMMUMemoryRegion *iommu_mr = IOMMU_MEMORY_REGION(section->mr);
-    uint64_t pagesize = memory_region_iommu_get_min_page_size(iommu_mr);
+    uint64_t pagesize = memory_region_iommu_get_min_page_size(iommu_mr), pgmask;
     unsigned entries, bits_total, bits_per_level, max_levels;
     struct vfio_iommu_spapr_tce_create create = { .argsz = sizeof(create) };
     long rampagesize = qemu_minrampagesize();
@@ -159,8 +158,8 @@ int vfio_spapr_create_window(VFIOContainer *container,
     if (pagesize > rampagesize) {
         pagesize = rampagesize;
     }
-    pagesize = 1ULL << (63 - clz64(container->pgsizes &
-                                   (pagesize | (pagesize - 1))));
+    pgmask = container->pgsizes & (pagesize | (pagesize - 1));
+    pagesize = pgmask ? (1ULL << (63 - clz64(pgmask))) : 0;
     if (!pagesize) {
         error_report("Host doesn't support page size 0x%"PRIx64
                      ", the supported mask is 0x%lx",

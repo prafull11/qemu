@@ -399,6 +399,7 @@ static void gicv3_cpuif_virt_update(GICv3CPUState *cs)
     int irqlevel = 0;
     int fiqlevel = 0;
     int maintlevel = 0;
+    ARMCPU *cpu = ARM_CPU(cs->cpu);
 
     idx = hppvi_index(cs);
     trace_gicv3_cpuif_virt_update(gicv3_redist_affid(cs), idx);
@@ -424,7 +425,7 @@ static void gicv3_cpuif_virt_update(GICv3CPUState *cs)
 
     qemu_set_irq(cs->parent_vfiq, fiqlevel);
     qemu_set_irq(cs->parent_virq, irqlevel);
-    qemu_set_irq(cs->maintenance_irq, maintlevel);
+    qemu_set_irq(cpu->gicv3_maintenance_interrupt, maintlevel);
 }
 
 static uint64_t icv_ap_read(CPUARMState *env, const ARMCPRegInfo *ri)
@@ -664,6 +665,9 @@ static uint64_t icv_iar_read(CPUARMState *env, const ARMCPRegInfo *ri)
 
     trace_gicv3_icv_iar_read(ri->crm == 8 ? 0 : 1,
                              gicv3_redist_affid(cs), intid);
+
+    gicv3_cpuif_virt_update(cs);
+
     return intid;
 }
 
@@ -1303,26 +1307,15 @@ static void icc_eoir_write(CPUARMState *env, const ARMCPRegInfo *ri,
     GICv3CPUState *cs = icc_cs_from_env(env);
     int irq = value & 0xffffff;
     int grp;
+    bool is_eoir0 = ri->crm == 8;
 
-    if (icv_access(env, ri->crm == 8 ? HCR_FMO : HCR_IMO)) {
+    if (icv_access(env, is_eoir0 ? HCR_FMO : HCR_IMO)) {
         icv_eoir_write(env, ri, value);
         return;
     }
 
-    trace_gicv3_icc_eoir_write(ri->crm == 8 ? 0 : 1,
+    trace_gicv3_icc_eoir_write(is_eoir0 ? 0 : 1,
                                gicv3_redist_affid(cs), value);
-
-    if (ri->crm == 8) {
-        /* EOIR0 */
-        grp = GICV3_G0;
-    } else {
-        /* EOIR1 */
-        if (arm_is_secure(env)) {
-            grp = GICV3_G1;
-        } else {
-            grp = GICV3_G1NS;
-        }
-    }
 
     if (irq >= cs->gic->num_irq) {
         /* This handles two cases:
@@ -1336,8 +1329,35 @@ static void icc_eoir_write(CPUARMState *env, const ARMCPRegInfo *ri,
         return;
     }
 
-    if (icc_highest_active_group(cs) != grp) {
-        return;
+    grp = icc_highest_active_group(cs);
+    switch (grp) {
+    case GICV3_G0:
+        if (!is_eoir0) {
+            return;
+        }
+        if (!(cs->gic->gicd_ctlr & GICD_CTLR_DS)
+            && arm_feature(env, ARM_FEATURE_EL3) && !arm_is_secure(env)) {
+            return;
+        }
+        break;
+    case GICV3_G1:
+        if (is_eoir0) {
+            return;
+        }
+        if (!arm_is_secure(env)) {
+            return;
+        }
+        break;
+    case GICV3_G1NS:
+        if (is_eoir0) {
+            return;
+        }
+        if (!arm_is_el3_or_mon(env) && arm_is_secure(env)) {
+            return;
+        }
+        break;
+    default:
+        g_assert_not_reached();
     }
 
     icc_drop_prio(cs, grp);
@@ -2620,8 +2640,6 @@ void gicv3_init_cpuif(GICv3State *s)
         if (arm_feature(&cpu->env, ARM_FEATURE_EL2)
             && cpu->gic_num_lrs) {
             int j;
-
-            cs->maintenance_irq = cpu->gicv3_maintenance_interrupt;
 
             cs->num_list_regs = cpu->gic_num_lrs;
             cs->vpribits = cpu->gic_vpribits;

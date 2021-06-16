@@ -32,20 +32,20 @@
 #include "sysemu/runstate.h"
 #include "sysemu/sysemu.h"
 #include "hw/sysbus.h"
-#include "exec/address-spaces.h"
+#include "qapi/error.h"
 #include "qemu/bcd.h"
 #include "qemu/module.h"
+#include "trace.h"
 
 #include "m48t59-internal.h"
 #include "migration/vmstate.h"
+#include "qom/object.h"
 
 #define TYPE_M48TXX_SYS_BUS "sysbus-m48txx"
-#define M48TXX_SYS_BUS_GET_CLASS(obj) \
-    OBJECT_GET_CLASS(M48txxSysBusDeviceClass, (obj), TYPE_M48TXX_SYS_BUS)
-#define M48TXX_SYS_BUS_CLASS(klass) \
-    OBJECT_CLASS_CHECK(M48txxSysBusDeviceClass, (klass), TYPE_M48TXX_SYS_BUS)
-#define M48TXX_SYS_BUS(obj) \
-    OBJECT_CHECK(M48txxSysBusState, (obj), TYPE_M48TXX_SYS_BUS)
+typedef struct M48txxSysBusDeviceClass M48txxSysBusDeviceClass;
+typedef struct M48txxSysBusState M48txxSysBusState;
+DECLARE_OBJ_CHECKERS(M48txxSysBusState, M48txxSysBusDeviceClass,
+                     M48TXX_SYS_BUS, TYPE_M48TXX_SYS_BUS)
 
 /*
  * Chipset docs:
@@ -54,16 +54,16 @@
  * http://www.st.com/stonline/products/literature/od/7001/m48t59y.pdf
  */
 
-typedef struct M48txxSysBusState {
+struct M48txxSysBusState {
     SysBusDevice parent_obj;
     M48t59State state;
     MemoryRegion io;
-} M48txxSysBusState;
+};
 
-typedef struct M48txxSysBusDeviceClass {
+struct M48txxSysBusDeviceClass {
     SysBusDeviceClass parent_class;
     M48txxInfo info;
-} M48txxSysBusDeviceClass;
+};
 
 static M48txxInfo m48txx_sysbus_info[] = {
     {
@@ -192,8 +192,7 @@ void m48t59_write(M48t59State *NVRAM, uint32_t addr, uint32_t val)
     struct tm tm;
     int tmp;
 
-    if (addr > 0x1FF8 && addr < 0x2000)
-	NVRAM_PRINTF("%s: 0x%08x => 0x%08x\n", __func__, addr, val);
+    trace_m48txx_nvram_mem_write(addr, val);
 
     /* check for NVRAM access */
     if ((NVRAM->model == 2 && addr < 0x7f8) ||
@@ -450,8 +449,7 @@ uint32_t m48t59_read(M48t59State *NVRAM, uint32_t addr)
 	}
         break;
     }
-    if (addr > 0x1FF9 && addr < 0x2000)
-       NVRAM_PRINTF("%s: 0x%08x <= 0x%08x\n", __func__, addr, retval);
+    trace_m48txx_nvram_mem_read(addr, retval);
 
     return retval;
 }
@@ -462,7 +460,7 @@ static void NVRAM_writeb(void *opaque, hwaddr addr, uint64_t val,
 {
     M48t59State *NVRAM = opaque;
 
-    NVRAM_PRINTF("%s: 0x%"HWADDR_PRIx" => 0x%"PRIx64"\n", __func__, addr, val);
+    trace_m48txx_nvram_io_write(addr, val);
     switch (addr) {
     case 0:
         NVRAM->addr &= ~0x00FF;
@@ -494,7 +492,7 @@ static uint64_t NVRAM_readb(void *opaque, hwaddr addr, unsigned size)
         retval = -1;
         break;
     }
-    NVRAM_PRINTF("%s: 0x%"HWADDR_PRIx" <= 0x%08x\n", __func__, addr, retval);
+    trace_m48txx_nvram_io_read(addr, retval);
 
     return retval;
 }
@@ -565,41 +563,6 @@ const MemoryRegionOps m48t59_io_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-/* Initialisation routine */
-Nvram *m48t59_init(qemu_irq IRQ, hwaddr mem_base,
-                   uint32_t io_base, uint16_t size, int base_year,
-                   int model)
-{
-    DeviceState *dev;
-    SysBusDevice *s;
-    int i;
-
-    for (i = 0; i < ARRAY_SIZE(m48txx_sysbus_info); i++) {
-        if (m48txx_sysbus_info[i].size != size ||
-            m48txx_sysbus_info[i].model != model) {
-            continue;
-        }
-
-        dev = qdev_create(NULL, m48txx_sysbus_info[i].bus_name);
-        qdev_prop_set_int32(dev, "base-year", base_year);
-        qdev_init_nofail(dev);
-        s = SYS_BUS_DEVICE(dev);
-        sysbus_connect_irq(s, 0, IRQ);
-        if (io_base != 0) {
-            memory_region_add_subregion(get_system_io(), io_base,
-                                        sysbus_mmio_get_region(s, 1));
-        }
-        if (mem_base != 0) {
-            sysbus_mmio_map(s, 0, mem_base);
-        }
-
-        return NVRAM(s);
-    }
-
-    assert(false);
-    return NULL;
-}
-
 void m48t59_realize_common(M48t59State *s, Error **errp)
 {
     s->buffer = g_malloc0(s->size);
@@ -667,7 +630,7 @@ static void m48txx_sysbus_class_init(ObjectClass *klass, void *data)
 
     dc->realize = m48t59_realize;
     dc->reset = m48t59_reset_sysbus;
-    dc->props = m48t59_sysbus_properties;
+    device_class_set_props(dc, m48t59_sysbus_properties);
     dc->vmsd = &vmstate_m48t59;
     nc->read = m48txx_sysbus_read;
     nc->write = m48txx_sysbus_write;

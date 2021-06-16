@@ -14,15 +14,16 @@ config PC
     imply ISA_DEBUG
     imply PARALLEL
     imply PCI_DEVICES
-    imply PVPANIC
+    imply PVPANIC_ISA
     imply QXL
     imply SEV
     imply SGA
     imply TEST_DEVICES
     imply TPM_CRB
-    imply TPM_TIS
+    imply TPM_TIS_ISA
     imply VGA_PCI
     imply VIRTIO_VGA
+    imply NVDIMM
     select FDC
     select I8259
     select I8254
@@ -35,6 +36,7 @@ config PC
     select ACPI_PCI
     select ACPI_VMGENID
     select VIRTIO_PMEM_SUPPORTED
+    select VIRTIO_MEM_SUPPORTED
 
 config PC_PCI
     bool
@@ -60,7 +62,8 @@ config I440FX
     select PC_PCI
     select PC_ACPI
     select ACPI_SMBUS
-    select PCI_PIIX
+    select PCI_I440FX
+    select PIIX3
     select IDE_PIIX
     select DIMM
     select SMBIOS
@@ -94,19 +97,28 @@ config Q35
 
 config MICROVM
     bool
-    imply SERIAL_ISA
+    select SERIAL_ISA # for serial_hds_isa_init()
     select ISA_BUS
     select APIC
     select IOAPIC
     select I8259
     select MC146818RTC
     select VIRTIO_MMIO
+    select ACPI_HW_REDUCED
+    select PCI_EXPRESS_GENERIC_BRIDGE
+    select USB_XHCI_SYSBUS
+
+config X86_IOMMU
+    bool
+    depends on PC
 
 config VTD
     bool
+    select X86_IOMMU
 
 config AMD_IOMMU
     bool
+    select X86_IOMMU
 
 config VMPORT
     bool

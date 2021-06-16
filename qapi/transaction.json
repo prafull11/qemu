@@ -1,11 +1,12 @@
 # -*- Mode: Python -*-
+# vim: filetype=python
 #
 
 ##
 # = Transactions
 ##
 
-{ 'include': 'block.json' }
+{ 'include': 'block-core.json' }
 
 ##
 # @Abort:
@@ -111,10 +112,10 @@
 #
 # On failure, the original disks pre-snapshot attempt will be used.
 #
-# For internal snapshots, the dictionary contains the device and the snapshot's
-# name.  If an internal snapshot matching name already exists, the request will
-# be rejected.  Only some image formats support it, for example, qcow2, rbd,
-# and sheepdog.
+# For internal snapshots, the dictionary contains the device and the
+# snapshot's name.  If an internal snapshot matching name already exists,
+# the request will be rejected.  Only some image formats support it, for
+# example, qcow2, and rbd,
 #
 # On failure, qemu will try delete the newly created internal snapshot in the
 # transaction.  When an I/O error occurs during deletion, the user needs to fix
@@ -132,8 +133,8 @@
 #          Errors depend on the operations of the transaction
 #
 # Note: The transaction aborts on the first failure.  Therefore, there will be
-# information on only one failed operation returned in an error condition, and
-# subsequent actions will not have been attempted.
+#       information on only one failed operation returned in an error condition, and
+#       subsequent actions will not have been attempted.
 #
 # Since: 1.1
 #

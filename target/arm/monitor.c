@@ -42,15 +42,6 @@ static GICCapability *gic_cap_new(int version)
     return cap;
 }
 
-static GICCapabilityList *gic_cap_list_add(GICCapabilityList *head,
-                                           GICCapability *cap)
-{
-    GICCapabilityList *item = g_new0(GICCapabilityList, 1);
-    item->value = cap;
-    item->next = head;
-    return item;
-}
-
 static inline void gic_cap_kvm_probe(GICCapability *v2, GICCapability *v3)
 {
 #ifdef CONFIG_KVM
@@ -84,8 +75,8 @@ GICCapabilityList *qmp_query_gic_capabilities(Error **errp)
 
     gic_cap_kvm_probe(v2, v3);
 
-    head = gic_cap_list_add(head, v2);
-    head = gic_cap_list_add(head, v3);
+    QAPI_LIST_PREPEND(head, v2);
+    QAPI_LIST_PREPEND(head, v3);
 
     return head;
 }
@@ -103,6 +94,8 @@ static const char *cpu_model_advertised_features[] = {
     "sve128", "sve256", "sve384", "sve512",
     "sve640", "sve768", "sve896", "sve1024", "sve1152", "sve1280",
     "sve1408", "sve1536", "sve1664", "sve1792", "sve1920", "sve2048",
+    "kvm-no-adjvtime", "kvm-steal-time",
+    "pauth", "pauth-impdef",
     NULL
 };
 
@@ -136,17 +129,20 @@ CpuModelExpansionInfo *qmp_query_cpu_model_expansion(CpuModelExpansionType type,
     }
 
     if (kvm_enabled()) {
-        const char *cpu_type = current_machine->cpu_type;
-        int len = strlen(cpu_type) - strlen(ARM_CPU_TYPE_SUFFIX);
         bool supported = false;
 
         if (!strcmp(model->name, "host") || !strcmp(model->name, "max")) {
             /* These are kvmarm's recommended cpu types */
             supported = true;
-        } else if (strlen(model->name) == len &&
-                   !strncmp(model->name, cpu_type, len)) {
-            /* KVM is enabled and we're using this type, so it works. */
-            supported = true;
+        } else if (current_machine->cpu_type) {
+            const char *cpu_type = current_machine->cpu_type;
+            int len = strlen(cpu_type) - strlen(ARM_CPU_TYPE_SUFFIX);
+
+            if (strlen(model->name) == len &&
+                !strncmp(model->name, cpu_type, len)) {
+                /* KVM is enabled and we're using this type, so it works. */
+                supported = true;
+            }
         }
         if (!supported) {
             error_setg(errp, "We cannot guarantee the CPU type '%s' works "
@@ -170,19 +166,16 @@ CpuModelExpansionInfo *qmp_query_cpu_model_expansion(CpuModelExpansionType type,
         Error *err = NULL;
 
         visitor = qobject_input_visitor_new(model->props);
-        visit_start_struct(visitor, NULL, NULL, 0, &err);
-        if (err) {
+        if (!visit_start_struct(visitor, NULL, NULL, 0, errp)) {
             visit_free(visitor);
             object_unref(obj);
-            error_propagate(errp, err);
             return NULL;
         }
 
         i = 0;
         while ((name = cpu_model_advertised_features[i++]) != NULL) {
             if (qdict_get(qdict_in, name)) {
-                object_property_set(obj, visitor, name, &err);
-                if (err) {
+                if (!object_property_set(obj, name, visitor, &err)) {
                     break;
                 }
             }
@@ -202,9 +195,7 @@ CpuModelExpansionInfo *qmp_query_cpu_model_expansion(CpuModelExpansionType type,
             return NULL;
         }
     } else {
-        Error *err = NULL;
-        arm_cpu_finalize_features(ARM_CPU(obj), &err);
-        assert(err == NULL);
+        arm_cpu_finalize_features(ARM_CPU(obj), &error_abort);
     }
 
     expansion_info = g_new0(CpuModelExpansionInfo, 1);
@@ -215,14 +206,12 @@ CpuModelExpansionInfo *qmp_query_cpu_model_expansion(CpuModelExpansionType type,
 
     i = 0;
     while ((name = cpu_model_advertised_features[i++]) != NULL) {
-        ObjectProperty *prop = object_property_find(obj, name, NULL);
+        ObjectProperty *prop = object_property_find(obj, name);
         if (prop) {
-            Error *err = NULL;
             QObject *value;
 
             assert(prop->get);
-            value = object_property_get_qobject(obj, name, &err);
-            assert(!err);
+            value = object_property_get_qobject(obj, name, &error_abort);
 
             qdict_put_obj(qdict_out, name, value);
         }

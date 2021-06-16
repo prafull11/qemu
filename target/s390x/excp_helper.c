@@ -29,7 +29,6 @@
 #include "exec/address-spaces.h"
 #include "tcg_s390x.h"
 #ifndef CONFIG_USER_ONLY
-#include "sysemu/sysemu.h"
 #include "hw/s390x/s390_flic.h"
 #include "hw/boards.h"
 #endif
@@ -156,12 +155,16 @@ bool s390_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         !address_space_access_valid(&address_space_memory, raddr,
                                     TARGET_PAGE_SIZE, access_type,
                                     MEMTXATTRS_UNSPECIFIED)) {
+        MachineState *ms = MACHINE(qdev_get_machine());
         qemu_log_mask(CPU_LOG_MMU,
                       "%s: raddr %" PRIx64 " > ram_size %" PRIx64 "\n",
-                      __func__, (uint64_t)raddr, (uint64_t)ram_size);
+                      __func__, (uint64_t)raddr, (uint64_t)ms->ram_size);
         excp = PGM_ADDRESSING;
         tec = 0; /* unused */
     }
+
+    env->tlb_fill_exc = excp;
+    env->tlb_fill_tec = tec;
 
     if (!excp) {
         qemu_log_mask(CPU_LOG_MMU,
@@ -305,15 +308,14 @@ static void do_ext_interrupt(CPUS390XState *env)
 
     if ((env->pending_int & INTERRUPT_EMERGENCY_SIGNAL) &&
         (env->cregs[0] & CR0_EMERGENCY_SIGNAL_SC)) {
+        MachineState *ms = MACHINE(qdev_get_machine());
+        unsigned int max_cpus = ms->smp.max_cpus;
+
         lowcore->ext_int_code = cpu_to_be16(EXT_EMERGENCY);
         cpu_addr = find_first_bit(env->emergency_signals, S390_MAX_CPUS);
         g_assert(cpu_addr < S390_MAX_CPUS);
         lowcore->cpu_addr = cpu_to_be16(cpu_addr);
         clear_bit(cpu_addr, env->emergency_signals);
-#ifndef CONFIG_USER_ONLY
-        MachineState *ms = MACHINE(qdev_get_machine());
-        unsigned int max_cpus = ms->smp.max_cpus;
-#endif
         if (bitmap_empty(env->emergency_signals, max_cpus)) {
             env->pending_int &= ~INTERRUPT_EMERGENCY_SIGNAL;
         }
@@ -394,7 +396,7 @@ static int mchk_store_vregs(CPUS390XState *env, uint64_t mcesao)
     MchkExtSaveArea *sa;
     int i;
 
-    sa = cpu_physical_memory_map(mcesao, &len, 1);
+    sa = cpu_physical_memory_map(mcesao, &len, true);
     if (!sa) {
         return -EFAULT;
     }
@@ -611,4 +613,27 @@ void s390x_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
     tcg_s390_program_interrupt(env, PGM_SPECIFICATION, retaddr);
 }
 
-#endif /* CONFIG_USER_ONLY */
+static void QEMU_NORETURN monitor_event(CPUS390XState *env,
+                                        uint64_t monitor_code,
+                                        uint8_t monitor_class, uintptr_t ra)
+{
+    /* Store the Monitor Code and the Monitor Class Number into the lowcore */
+    stq_phys(env_cpu(env)->as,
+             env->psa + offsetof(LowCore, monitor_code), monitor_code);
+    stw_phys(env_cpu(env)->as,
+             env->psa + offsetof(LowCore, mon_class_num), monitor_class);
+
+    tcg_s390_program_interrupt(env, PGM_MONITOR, ra);
+}
+
+void HELPER(monitor_call)(CPUS390XState *env, uint64_t monitor_code,
+                          uint32_t monitor_class)
+{
+    g_assert(monitor_class <= 0xff);
+
+    if (env->cregs[8] & (0x8000 >> monitor_class)) {
+        monitor_event(env, monitor_code, monitor_class, GETPC());
+    }
+}
+
+#endif /* !CONFIG_USER_ONLY */

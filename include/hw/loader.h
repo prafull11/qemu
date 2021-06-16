@@ -101,6 +101,7 @@ const char *load_elf_strerror(int error);
  * @pentry: Populated with program entry point. Ignored if NULL.
  * @lowaddr: Populated with lowest loaded address. Ignored if NULL.
  * @highaddr: Populated with highest loaded address. Ignored if NULL.
+ * @pflags: Populated with ELF processor-specific flags. Ignore if NULL.
  * @bigendian: Expected ELF endianness. 0 for LE otherwise BE
  * @elf_machine: Expected ELF machine type
  * @clear_lsb: Set to mask off LSB of addresses (Some architectures use
@@ -131,8 +132,9 @@ int load_elf_ram_sym(const char *filename,
                      uint64_t (*elf_note_fn)(void *, void *, bool),
                      uint64_t (*translate_fn)(void *, uint64_t),
                      void *translate_opaque, uint64_t *pentry,
-                     uint64_t *lowaddr, uint64_t *highaddr, int big_endian,
-                     int elf_machine, int clear_lsb, int data_swab,
+                     uint64_t *lowaddr, uint64_t *highaddr, uint32_t *pflags,
+                     int big_endian, int elf_machine,
+                     int clear_lsb, int data_swab,
                      AddressSpace *as, bool load_rom, symbol_fn_t sym_cb);
 
 /** load_elf_ram:
@@ -143,9 +145,9 @@ int load_elf_ram(const char *filename,
                  uint64_t (*elf_note_fn)(void *, void *, bool),
                  uint64_t (*translate_fn)(void *, uint64_t),
                  void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-                 uint64_t *highaddr, int big_endian, int elf_machine,
-                 int clear_lsb, int data_swab, AddressSpace *as,
-                 bool load_rom);
+                 uint64_t *highaddr, uint32_t *pflags, int big_endian,
+                 int elf_machine, int clear_lsb, int data_swab,
+                 AddressSpace *as, bool load_rom);
 
 /** load_elf_as:
  * Same as load_elf_ram(), but always loads the elf as ROM
@@ -154,8 +156,9 @@ int load_elf_as(const char *filename,
                 uint64_t (*elf_note_fn)(void *, void *, bool),
                 uint64_t (*translate_fn)(void *, uint64_t),
                 void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-                uint64_t *highaddr, int big_endian, int elf_machine,
-                int clear_lsb, int data_swab, AddressSpace *as);
+                uint64_t *highaddr, uint32_t *pflags, int big_endian,
+                int elf_machine, int clear_lsb, int data_swab,
+                AddressSpace *as);
 
 /** load_elf:
  * Same as load_elf_as(), but doesn't allow the caller to specify an
@@ -165,8 +168,8 @@ int load_elf(const char *filename,
              uint64_t (*elf_note_fn)(void *, void *, bool),
              uint64_t (*translate_fn)(void *, uint64_t),
              void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-             uint64_t *highaddr, int big_endian, int elf_machine,
-             int clear_lsb, int data_swab);
+             uint64_t *highaddr, uint32_t *pflags, int big_endian,
+             int elf_machine, int clear_lsb, int data_swab);
 
 /** load_elf_hdr:
  * @filename: Path of ELF file
@@ -287,6 +290,37 @@ void rom_transaction_end(bool commit);
 
 int rom_copy(uint8_t *dest, hwaddr addr, size_t size);
 void *rom_ptr(hwaddr addr, size_t size);
+/**
+ * rom_ptr_for_as: Return a pointer to ROM blob data for the address
+ * @as: AddressSpace to look for the ROM blob in
+ * @addr: Address within @as
+ * @size: size of data required in bytes
+ *
+ * Returns: pointer into the data which backs the matching ROM blob,
+ * or NULL if no blob covers the address range.
+ *
+ * This function looks for a ROM blob which covers the specified range
+ * of bytes of length @size starting at @addr within the address space
+ * @as. This is useful for code which runs as part of board
+ * initialization or CPU reset which wants to read data that is part
+ * of a user-supplied guest image or other guest memory contents, but
+ * which runs before the ROM loader's reset function has copied the
+ * blobs into guest memory.
+ *
+ * rom_ptr_for_as() will look not just for blobs loaded directly to
+ * the specified address, but also for blobs which were loaded to an
+ * alias of the region at a different location in the AddressSpace.
+ * In other words, if a machine model has RAM at address 0x0000_0000
+ * which is aliased to also appear at 0x1000_0000, rom_ptr_for_as()
+ * will return the correct data whether the guest image was linked and
+ * loaded at 0x0000_0000 or 0x1000_0000.  Contrast rom_ptr(), which
+ * will only return data if the image load address is an exact match
+ * with the queried address.
+ *
+ * New code should prefer to use rom_ptr_for_as() instead of
+ * rom_ptr().
+ */
+void *rom_ptr_for_as(AddressSpace *as, hwaddr addr, size_t size);
 void hmp_info_roms(Monitor *mon, const QDict *qdict);
 
 #define rom_add_file_fixed(_f, _a, _i)          \

@@ -21,20 +21,26 @@
 #include "exec/hwaddr.h"
 #include "qemu/notify.h"
 
+#include "hw/i386/topology.h"
 #include "hw/boards.h"
 #include "hw/nmi.h"
+#include "hw/isa/isa.h"
+#include "hw/i386/ioapic.h"
+#include "qom/object.h"
 
-typedef struct {
+struct X86MachineClass {
     /*< private >*/
     MachineClass parent;
 
     /*< public >*/
 
+    /* TSC rate migration: */
+    bool save_tsc_khz;
     /* Enables contiguous-apic-ID mode */
     bool compat_apic_id_mode;
-} X86MachineClass;
+};
 
-typedef struct {
+struct X86MachineState {
     /*< private >*/
     MachineState parent;
 
@@ -44,36 +50,41 @@ typedef struct {
     ISADevice *rtc;
     FWCfgState *fw_cfg;
     qemu_irq *gsi;
+    DeviceState *ioapic2;
     GMappedFile *initrd_mapped_file;
-
-    /* Configuration options: */
-    uint64_t max_ram_below_4g;
+    HotplugHandler *acpi_dev;
 
     /* RAM information (sizes, addresses, configuration): */
     ram_addr_t below_4g_mem_size, above_4g_mem_size;
 
     /* CPU and apic information: */
     bool apic_xrupt_override;
+    unsigned pci_irq_mask;
     unsigned apic_id_limit;
     uint16_t boot_cpus;
     unsigned smp_dies;
 
+    OnOffAuto smm;
+    OnOffAuto acpi;
+
+    char *oem_id;
+    char *oem_table_id;
     /*
      * Address space used by IOAPIC device. All IOAPIC interrupts
      * will be translated to MSI messages in the address space.
      */
     AddressSpace *ioapic_as;
-} X86MachineState;
+};
 
-#define X86_MACHINE_MAX_RAM_BELOW_4G "max-ram-below-4g"
+#define X86_MACHINE_SMM              "smm"
+#define X86_MACHINE_ACPI             "acpi"
+#define X86_MACHINE_OEM_ID           "x-oem-id"
+#define X86_MACHINE_OEM_TABLE_ID     "x-oem-table-id"
 
 #define TYPE_X86_MACHINE   MACHINE_TYPE_NAME("x86")
-#define X86_MACHINE(obj) \
-    OBJECT_CHECK(X86MachineState, (obj), TYPE_X86_MACHINE)
-#define X86_MACHINE_GET_CLASS(obj) \
-    OBJECT_GET_CLASS(X86MachineClass, obj, TYPE_X86_MACHINE)
-#define X86_MACHINE_CLASS(class) \
-    OBJECT_CLASS_CHECK(X86MachineClass, class, TYPE_X86_MACHINE)
+OBJECT_DECLARE_TYPE(X86MachineState, X86MachineClass, X86_MACHINE)
+
+void init_topo_info(X86CPUTopoInfo *topo_info, const X86MachineState *x86ms);
 
 uint32_t x86_cpu_apic_id_from_index(X86MachineState *pcms,
                                     unsigned int cpu_index);
@@ -84,13 +95,43 @@ CpuInstanceProperties x86_cpu_index_to_props(MachineState *ms,
                                              unsigned cpu_index);
 int64_t x86_get_default_cpu_node_id(const MachineState *ms, int idx);
 const CPUArchIdList *x86_possible_cpu_arch_ids(MachineState *ms);
+CPUArchId *x86_find_cpu_slot(MachineState *ms, uint32_t id, int *idx);
+void x86_rtc_set_cpus_count(ISADevice *rtc, uint16_t cpus_count);
+void x86_cpu_pre_plug(HotplugHandler *hotplug_dev,
+                      DeviceState *dev, Error **errp);
+void x86_cpu_plug(HotplugHandler *hotplug_dev,
+                  DeviceState *dev, Error **errp);
+void x86_cpu_unplug_request_cb(HotplugHandler *hotplug_dev,
+                               DeviceState *dev, Error **errp);
+void x86_cpu_unplug_cb(HotplugHandler *hotplug_dev,
+                       DeviceState *dev, Error **errp);
 
-void x86_bios_rom_init(MemoryRegion *rom_memory, bool isapc_ram_fw);
+void x86_bios_rom_init(MachineState *ms, const char *default_firmware,
+                       MemoryRegion *rom_memory, bool isapc_ram_fw);
 
 void x86_load_linux(X86MachineState *x86ms,
                     FWCfgState *fw_cfg,
                     int acpi_data_size,
                     bool pvh_enabled,
                     bool linuxboot_dma_enabled);
+
+bool x86_machine_is_smm_enabled(const X86MachineState *x86ms);
+bool x86_machine_is_acpi_enabled(const X86MachineState *x86ms);
+
+/* Global System Interrupts */
+
+#define GSI_NUM_PINS IOAPIC_NUM_PINS
+#define ACPI_BUILD_PCI_IRQS ((1<<5) | (1<<9) | (1<<10) | (1<<11))
+
+typedef struct GSIState {
+    qemu_irq i8259_irq[ISA_NUM_IRQS];
+    qemu_irq ioapic_irq[IOAPIC_NUM_PINS];
+    qemu_irq ioapic2_irq[IOAPIC_NUM_PINS];
+} GSIState;
+
+qemu_irq x86_allocate_cpu_irq(void);
+void gsi_handler(void *opaque, int n, int level);
+void ioapic_init_gsi(GSIState *gsi_state, const char *parent_name);
+DeviceState *ioapic_init_secondary(GSIState *gsi_state);
 
 #endif

@@ -19,6 +19,7 @@
 #include "qemu/error-report.h"
 #include "qemu/config-file.h"
 #include "qapi/error.h"
+#include "qemu/lockable.h"
 #include "qemu/option.h"
 #include "qemu/rcu_queue.h"
 #include "qemu/qht.h"
@@ -26,11 +27,11 @@
 #include "qemu/xxhash.h"
 #include "qemu/plugin.h"
 #include "hw/core/cpu.h"
-#include "cpu.h"
 #include "exec/exec-all.h"
 #ifndef CONFIG_USER_ONLY
 #include "hw/boards.h"
 #endif
+#include "qemu/compiler.h"
 
 #include "plugin.h"
 
@@ -149,7 +150,13 @@ static uint64_t xorshift64star(uint64_t x)
     return x * UINT64_C(2685821657736338717);
 }
 
-static int plugin_load(struct qemu_plugin_desc *desc, const qemu_info_t *info)
+/*
+ * Disable CFI checks.
+ * The install and version functions have been loaded from an external library
+ * so we do not have type information
+ */
+QEMU_DISABLE_CFI
+static int plugin_load(struct qemu_plugin_desc *desc, const qemu_info_t *info, Error **errp)
 {
     qemu_plugin_install_func_t install;
     struct qemu_plugin_ctx *ctx;
@@ -162,20 +169,39 @@ static int plugin_load(struct qemu_plugin_desc *desc, const qemu_info_t *info)
 
     ctx->handle = g_module_open(desc->path, G_MODULE_BIND_LOCAL);
     if (ctx->handle == NULL) {
-        error_report("%s: %s", __func__, g_module_error());
+        error_setg(errp, "Could not load plugin %s: %s", desc->path, g_module_error());
         goto err_dlopen;
     }
 
     if (!g_module_symbol(ctx->handle, "qemu_plugin_install", &sym)) {
-        error_report("%s: %s", __func__, g_module_error());
+        error_setg(errp, "Could not load plugin %s: %s", desc->path, g_module_error());
         goto err_symbol;
     }
     install = (qemu_plugin_install_func_t) sym;
     /* symbol was found; it could be NULL though */
     if (install == NULL) {
-        error_report("%s: %s: qemu_plugin_install is NULL",
-                     __func__, desc->path);
+        error_setg(errp, "Could not load plugin %s: qemu_plugin_install is NULL",
+                   desc->path);
         goto err_symbol;
+    }
+
+    if (!g_module_symbol(ctx->handle, "qemu_plugin_version", &sym)) {
+        error_setg(errp, "Could not load plugin %s: plugin does not declare API version %s",
+                   desc->path, g_module_error());
+        goto err_symbol;
+    } else {
+        int version = *(int *)sym;
+        if (version < QEMU_PLUGIN_MIN_VERSION) {
+            error_setg(errp, "Could not load plugin %s: plugin requires API version %d, but "
+                       "this QEMU supports only a minimum version of %d",
+                       desc->path, version, QEMU_PLUGIN_MIN_VERSION);
+            goto err_symbol;
+        } else if (version > QEMU_PLUGIN_VERSION) {
+            error_setg(errp, "Could not load plugin %s: plugin requires API version %d, but "
+                       "this QEMU supports only up to version %d",
+                       desc->path, version, QEMU_PLUGIN_VERSION);
+            goto err_symbol;
+        }
     }
 
     qemu_rec_mutex_lock(&plugin.lock);
@@ -200,8 +226,8 @@ static int plugin_load(struct qemu_plugin_desc *desc, const qemu_info_t *info)
     rc = install(ctx->id, info, desc->argc, desc->argv);
     ctx->installing = false;
     if (rc) {
-        error_report("%s: qemu_plugin_install returned error code %d",
-                     __func__, rc);
+        error_setg(errp, "Could not load plugin %s: qemu_plugin_install returned error code %d",
+                   desc->path, rc);
         /*
          * we cannot rely on the plugin doing its own cleanup, so
          * call a full uninstall if the plugin did not yet call it.
@@ -215,6 +241,7 @@ static int plugin_load(struct qemu_plugin_desc *desc, const qemu_info_t *info)
     return rc;
 
  err_symbol:
+    g_module_close(ctx->handle);
  err_dlopen:
     qemu_vfree(ctx);
     return 1;
@@ -242,12 +269,14 @@ static void plugin_desc_free(struct qemu_plugin_desc *desc)
  * Note: the descriptor of each successfully installed plugin is removed
  * from the list given by @head.
  */
-int qemu_plugin_load_list(QemuPluginList *head)
+int qemu_plugin_load_list(QemuPluginList *head, Error **errp)
 {
     struct qemu_plugin_desc *desc, *next;
     g_autofree qemu_info_t *info = g_new0(qemu_info_t, 1);
 
     info->target_name = TARGET_NAME;
+    info->version.min = QEMU_PLUGIN_MIN_VERSION;
+    info->version.cur = QEMU_PLUGIN_VERSION;
 #ifndef CONFIG_USER_ONLY
     MachineState *ms = MACHINE(qdev_get_machine());
     info->system_emulation = true;
@@ -260,7 +289,7 @@ int qemu_plugin_load_list(QemuPluginList *head)
     QTAILQ_FOREACH_SAFE(desc, head, entry, next) {
         int err;
 
-        err = plugin_load(desc, info);
+        err = plugin_load(desc, info, errp);
         if (err) {
             return err;
         }
@@ -346,15 +375,14 @@ void plugin_reset_uninstall(qemu_plugin_id_t id,
     struct qemu_plugin_reset_data *data;
     struct qemu_plugin_ctx *ctx;
 
-    qemu_rec_mutex_lock(&plugin.lock);
-    ctx = plugin_id_to_ctx_locked(id);
-    if (ctx->uninstalling || (reset && ctx->resetting)) {
-        qemu_rec_mutex_unlock(&plugin.lock);
-        return;
+    WITH_QEMU_LOCK_GUARD(&plugin.lock) {
+        ctx = plugin_id_to_ctx_locked(id);
+        if (ctx->uninstalling || (reset && ctx->resetting)) {
+            return;
+        }
+        ctx->resetting = reset;
+        ctx->uninstalling = !reset;
     }
-    ctx->resetting = reset;
-    ctx->uninstalling = !reset;
-    qemu_rec_mutex_unlock(&plugin.lock);
 
     data = g_new(struct qemu_plugin_reset_data, 1);
     data->ctx = ctx;

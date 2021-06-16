@@ -31,6 +31,7 @@
 #include "migration/vmstate.h"
 #include "trace.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 /*
  * Registers of hardware timer in sun4m.
@@ -59,16 +60,15 @@ typedef struct CPUTimerState {
 } CPUTimerState;
 
 #define TYPE_SLAVIO_TIMER "slavio_timer"
-#define SLAVIO_TIMER(obj) \
-    OBJECT_CHECK(SLAVIO_TIMERState, (obj), TYPE_SLAVIO_TIMER)
+OBJECT_DECLARE_SIMPLE_TYPE(SLAVIO_TIMERState, SLAVIO_TIMER)
 
-typedef struct SLAVIO_TIMERState {
+struct SLAVIO_TIMERState {
     SysBusDevice parent_obj;
 
     uint32_t num_cpus;
     uint32_t cputimer_mode;
     CPUTimerState cputimer[MAX_CPUS + 1];
-} SLAVIO_TIMERState;
+};
 
 typedef struct TimerContext {
     MemoryRegion iomem;
@@ -332,6 +332,10 @@ static const MemoryRegionOps slavio_timer_mem_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
     .valid = {
         .min_access_size = 4,
+        .max_access_size = 8,
+    },
+    .impl = {
+        .min_access_size = 4,
         .max_access_size = 4,
     },
 };
@@ -427,7 +431,7 @@ static void slavio_timer_class_init(ObjectClass *klass, void *data)
 
     dc->reset = slavio_timer_reset;
     dc->vmsd = &vmstate_slavio_timer;
-    dc->props = slavio_timer_properties;
+    device_class_set_props(dc, slavio_timer_properties);
 }
 
 static const TypeInfo slavio_timer_info = {

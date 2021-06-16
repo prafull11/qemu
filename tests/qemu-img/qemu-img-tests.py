@@ -3,9 +3,9 @@ import random
 import subprocess
 
 #images_path = "/var/triliovault-mounts/test1/"
-images_path = "/home/centos/qemu-merge/qemu/build/tmp"
+images_path = os.path.join(os.getcwd(), "tmp")
 for mainloop in range(1):
-    print "Iteration %d" % mainloop
+    print("Iteration %d" % mainloop)
     paths = [os.path.join(images_path, 'base.raw'), os.path.join(images_path, 'overlay.raw'), os.path.join(images_path, 'base.qcow2'),
              os.path.join(images_path, 'overlay.qcow2'), os.path.join(images_path, 'q1.qcow2'), os.path.join(images_path, 'q1.raw')]
  
@@ -30,9 +30,9 @@ for mainloop in range(1):
 
     for i in range(1):
         for cmd in cmds:
-            print cmd
+            print(cmd)
             #if 'qemu-img convert' in cmd:
             subprocess.call(cmd.split())
         cmp_command = "cmp %s %s" % (os.path.join(images_path, "q1.raw"), os.path.join(images_path, "overlay"))
         assert subprocess.call(cmp_command.split()) == 0
-        print cmp_command
+        print(cmp_command)

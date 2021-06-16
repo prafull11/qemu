@@ -32,6 +32,7 @@
 #include "qemu/module.h"
 
 #include "trace.h"
+#include "qom/object.h"
 
 #define UNIT_REG_SIZE    16     /* Size of memory mapped regs for the unit */
 #define GPTIMER_REG_SIZE 16     /* Size of memory mapped regs for a GPTimer */
@@ -55,11 +56,9 @@
 #define COUNTER_RELOAD_OFFSET 0x04
 #define TIMER_BASE            0x10
 
-#define GRLIB_GPTIMER(obj) \
-    OBJECT_CHECK(GPTimerUnit, (obj), TYPE_GRLIB_GPTIMER)
+OBJECT_DECLARE_SIMPLE_TYPE(GPTimerUnit, GRLIB_GPTIMER)
 
 typedef struct GPTimer     GPTimer;
-typedef struct GPTimerUnit GPTimerUnit;
 
 struct GPTimer {
     struct ptimer_state *ptimer;
@@ -415,7 +414,7 @@ static void grlib_gptimer_class_init(ObjectClass *klass, void *data)
 
     dc->realize = grlib_gptimer_realize;
     dc->reset = grlib_gptimer_reset;
-    dc->props = grlib_gptimer_properties;
+    device_class_set_props(dc, grlib_gptimer_properties);
 }
 
 static const TypeInfo grlib_gptimer_info = {

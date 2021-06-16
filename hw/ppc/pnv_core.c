@@ -5,7 +5,7 @@
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
- * as published by the Free Software Foundation; either version 2 of
+ * as published by the Free Software Foundation; either version 2.1 of
  * the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful, but
@@ -29,6 +29,7 @@
 #include "hw/ppc/pnv_xscom.h"
 #include "hw/ppc/xics.h"
 #include "hw/qdev-properties.h"
+#include "helper_regs.h"
 
 static const char *pnv_core_cpu_typename(PnvCore *pc)
 {
@@ -40,11 +41,11 @@ static const char *pnv_core_cpu_typename(PnvCore *pc)
     return cpu_type;
 }
 
-static void pnv_core_cpu_reset(PowerPCCPU *cpu, PnvChip *chip)
+static void pnv_core_cpu_reset(PnvCore *pc, PowerPCCPU *cpu)
 {
     CPUState *cs = CPU(cpu);
     CPUPPCState *env = &cpu->env;
-    PnvChipClass *pcc = PNV_CHIP_GET_CLASS(chip);
+    PnvChipClass *pcc = PNV_CHIP_GET_CLASS(pc->chip);
 
     cpu_reset(cs);
 
@@ -55,8 +56,10 @@ static void pnv_core_cpu_reset(PowerPCCPU *cpu, PnvChip *chip)
     env->gpr[3] = PNV_FDT_ADDR;
     env->nip = 0x10;
     env->msr |= MSR_HVB; /* Hypervisor mode */
+    env->spr[SPR_HRMOR] = pc->hrmor;
+    hreg_compute_hflags(env);
 
-    pcc->intc_reset(chip, cpu);
+    pcc->intc_reset(pc->chip, cpu);
 }
 
 /*
@@ -162,28 +165,26 @@ static const MemoryRegionOps pnv_core_power9_xscom_ops = {
     .endianness = DEVICE_BIG_ENDIAN,
 };
 
-static void pnv_core_cpu_realize(PowerPCCPU *cpu, PnvChip *chip, Error **errp)
+static void pnv_core_cpu_realize(PnvCore *pc, PowerPCCPU *cpu, Error **errp)
 {
     CPUPPCState *env = &cpu->env;
     int core_pir;
     int thread_index = 0; /* TODO: TCG supports only one thread */
     ppc_spr_t *pir = &env->spr_cb[SPR_PIR];
     Error *local_err = NULL;
-    PnvChipClass *pcc = PNV_CHIP_GET_CLASS(chip);
+    PnvChipClass *pcc = PNV_CHIP_GET_CLASS(pc->chip);
 
-    object_property_set_bool(OBJECT(cpu), true, "realized", &local_err);
+    if (!qdev_realize(DEVICE(cpu), NULL, errp)) {
+        return;
+    }
+
+    pcc->intc_create(pc->chip, cpu, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
         return;
     }
 
-    pcc->intc_create(chip, cpu, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
-        return;
-    }
-
-    core_pir = object_property_get_uint(OBJECT(cpu), "core-pir", &error_abort);
+    core_pir = object_property_get_uint(OBJECT(pc), "pir", &error_abort);
 
     /*
      * The PIR of a thread is the core PIR + the thread index. We will
@@ -203,7 +204,7 @@ static void pnv_core_reset(void *dev)
     int i;
 
     for (i = 0; i < cc->nr_threads; i++) {
-        pnv_core_cpu_reset(pc->threads[i], pc->chip);
+        pnv_core_cpu_reset(pc, pc->threads[i]);
     }
 }
 
@@ -217,15 +218,8 @@ static void pnv_core_realize(DeviceState *dev, Error **errp)
     void *obj;
     int i, j;
     char name[32];
-    Object *chip;
 
-    chip = object_property_get_link(OBJECT(dev), "chip", &local_err);
-    if (!chip) {
-        error_propagate_prepend(errp, local_err,
-                                "required link 'chip' not found: ");
-        return;
-    }
-    pc->chip = PNV_CHIP(chip);
+    assert(pc->chip);
 
     pc->threads = g_new(PowerPCCPU *, cc->nr_threads);
     for (i = 0; i < cc->nr_threads; i++) {
@@ -237,9 +231,7 @@ static void pnv_core_realize(DeviceState *dev, Error **errp)
         pc->threads[i] = POWERPC_CPU(obj);
 
         snprintf(name, sizeof(name), "thread[%d]", i);
-        object_property_add_child(OBJECT(pc), name, obj, &error_abort);
-        object_property_add_alias(obj, "core-pir", OBJECT(pc),
-                                  "pir", &error_abort);
+        object_property_add_child(OBJECT(pc), name, obj);
 
         cpu->machine_data = g_new0(PnvCPUState, 1);
 
@@ -247,13 +239,14 @@ static void pnv_core_realize(DeviceState *dev, Error **errp)
     }
 
     for (j = 0; j < cc->nr_threads; j++) {
-        pnv_core_cpu_realize(pc->threads[j], pc->chip, &local_err);
+        pnv_core_cpu_realize(pc, pc->threads[j], &local_err);
         if (local_err) {
             goto err;
         }
     }
 
     snprintf(name, sizeof(name), "xscom-core.%d", cc->core_id);
+    /* TODO: check PNV_XSCOM_EX_SIZE for p10 */
     pnv_xscom_region_init(&pc->xscom_regs, OBJECT(dev), pcc->xscom_ops,
                           pc, name, PNV_XSCOM_EX_SIZE);
 
@@ -269,18 +262,19 @@ err:
     error_propagate(errp, local_err);
 }
 
-static void pnv_core_cpu_unrealize(PowerPCCPU *cpu)
+static void pnv_core_cpu_unrealize(PnvCore *pc, PowerPCCPU *cpu)
 {
     PnvCPUState *pnv_cpu = pnv_cpu_state(cpu);
+    PnvChipClass *pcc = PNV_CHIP_GET_CLASS(pc->chip);
 
-    object_unparent(OBJECT(pnv_cpu_state(cpu)->intc));
+    pcc->intc_destroy(pc->chip, cpu);
     cpu_remove_sync(CPU(cpu));
     cpu->machine_data = NULL;
     g_free(pnv_cpu);
     object_unparent(OBJECT(cpu));
 }
 
-static void pnv_core_unrealize(DeviceState *dev, Error **errp)
+static void pnv_core_unrealize(DeviceState *dev)
 {
     PnvCore *pc = PNV_CORE(dev);
     CPUCore *cc = CPU_CORE(dev);
@@ -289,13 +283,15 @@ static void pnv_core_unrealize(DeviceState *dev, Error **errp)
     qemu_unregister_reset(pnv_core_reset, pc);
 
     for (i = 0; i < cc->nr_threads; i++) {
-        pnv_core_cpu_unrealize(pc->threads[i]);
+        pnv_core_cpu_unrealize(pc, pc->threads[i]);
     }
     g_free(pc->threads);
 }
 
 static Property pnv_core_properties[] = {
     DEFINE_PROP_UINT32("pir", PnvCore, pir, 0),
+    DEFINE_PROP_UINT64("hrmor", PnvCore, hrmor, 0),
+    DEFINE_PROP_LINK("chip", PnvCore, chip, TYPE_PNV_CHIP, PnvChip *),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -313,13 +309,22 @@ static void pnv_core_power9_class_init(ObjectClass *oc, void *data)
     pcc->xscom_ops = &pnv_core_power9_xscom_ops;
 }
 
+static void pnv_core_power10_class_init(ObjectClass *oc, void *data)
+{
+    PnvCoreClass *pcc = PNV_CORE_CLASS(oc);
+
+    /* TODO: Use the P9 XSCOMs for now on P10 */
+    pcc->xscom_ops = &pnv_core_power9_xscom_ops;
+}
+
 static void pnv_core_class_init(ObjectClass *oc, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = pnv_core_realize;
     dc->unrealize = pnv_core_unrealize;
-    dc->props = pnv_core_properties;
+    device_class_set_props(dc, pnv_core_properties);
+    dc->user_creatable = false;
 }
 
 #define DEFINE_PNV_CORE_TYPE(family, cpu_model) \
@@ -342,6 +347,7 @@ static const TypeInfo pnv_core_infos[] = {
     DEFINE_PNV_CORE_TYPE(power8, "power8_v2.0"),
     DEFINE_PNV_CORE_TYPE(power8, "power8nvl_v1.0"),
     DEFINE_PNV_CORE_TYPE(power9, "power9_v2.0"),
+    DEFINE_PNV_CORE_TYPE(power10, "power10_v1.0"),
 };
 
 DEFINE_TYPES(pnv_core_infos)
@@ -416,7 +422,8 @@ static void pnv_quad_class_init(ObjectClass *oc, void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = pnv_quad_realize;
-    dc->props = pnv_quad_properties;
+    device_class_set_props(dc, pnv_quad_properties);
+    dc->user_creatable = false;
 }
 
 static const TypeInfo pnv_quad_info = {
