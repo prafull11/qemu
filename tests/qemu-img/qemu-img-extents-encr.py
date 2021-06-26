@@ -3,58 +3,51 @@ import os
 import random
 import subprocess
 
-paths = ['tmp/overlay',
-         'tmp/base.qcow2',
-         'tmp/overlay.qcow2',
-         'tmp/q1.qcow2',
-         'tmp/q1.raw',
-         'tmp/extents.test']
- 
+images_path = os.path.join(os.getcwd(), "tmp")
+paths = [os.path.join(images_path, 'overlay'), os.path.join(images_path, 'base.qcow2'),
+         os.path.join(images_path, 'overlay.qcow2'), os.path.join(images_path, 'q1.qcow2'), os.path.join(images_path, 'q1.raw'),
+         os.path.join(images_path, 'extents.test')]
 
 def test_iteration(extents):
 
     for p in paths:
         os.path.exists(p) and os.remove(p)
 
-    cmds =  ["dd if=/dev/urandom of=tmp/base bs=1M count=1024".split(),
-             "cp tmp/base tmp/overlay".split(),
-             "./qemu-img create --object secret,id=sec0,data=backing -f qcow2 -o encrypt.format=luks,encrypt.key-secret=sec0 tmp/base.qcow2 1G".split(),
-             "stat tmp/base.qcow2".split(),
-
-             "./qemu-img convert -p --object secret,id=sec0,data=backing --object secret,id=sec2,data=convert "
-             "--image-opts driver=qcow2,encrypt.key-secret=sec0,file.filename=tmp/base.qcow2 -O qcow2 -o "
-             "encrypt.format=aes,encrypt.key-secret=sec2 tmp/convert.qcow2".split(),
-
-             "cp tmp/base.qcow2 tmp/base.qcow2.bak".split(),
-             "./qemu-img info tmp/base.qcow2".split(),
-             "./qemu-img info tmp/convert.qcow2".split(),
+    cmds =  [("dd if=/dev/urandom of=%s bs=1M count=1024" % os.path.join(images_path, "base")).split(),
+             ("cp %s %s" % (os.path.join(images_path, "base"), os.path.join(images_path, "overlay"))).split(),
+             ("./qemu-img convert -p --object secret,id=sec0,data=backing --object secret,id=sec2,data=backing --image-opts driver=raw,file.filename=%s -O qcow2 -o encrypt.format=luks,encrypt.key-secret=sec2 %s" % (os.path.join(images_path, "base"), os.path.join(images_path, "base.qcow2"))).split(),
+             ("stat %s" % os.path.join(images_path, "base.qcow2")).split(),
+             ("./qemu-img convert -p --object secret,id=sec0,data=backing --object secret,id=sec2,data=backing "
+             "--image-opts driver=qcow2,encrypt.key-secret=sec0,file.filename=%s -O qcow2 -o "
+             "encrypt.format=aes,encrypt.key-secret=sec2 %s" % (os.path.join(images_path, "base.qcow2"), os.path.join(images_path, "convert.qcow2"))).split(),
+             ("cp %s %s" % (os.path.join(images_path, "base.qcow2"), os.path.join(images_path, "base.qcow2.bak"))).split(),
+             ("./qemu-img info %s" % os.path.join(images_path, "base.qcow2")).split(),
             ]
 
-    #for item in extents:
-       #cmds.append(("dd if=/dev/urandom of=tmp/overlay conv=nocreat,notrunc "
-                   #"seek=%d bs=1 count=%d" % (item['offset'], item['length'])).split())
+    for item in extents:
+       cmds.append(("dd if=/dev/urandom of=tmp/overlay conv=nocreat,notrunc "
+                    "seek=%d bs=1 count=%d" % (item['offset'], item['length'])).split())
 
     with open("tmp/extents.test", "w") as f:
         f.write('Offset   Length  Type\n')
         for item in extents:
             f.write("%d %d data\n" % (item['offset'], item['length']))
-    json_payload = 'json:{ "encrypt.key-secret": "sec0", "driver": "qcow2", "file": { "driver": "file", "filename": "tmp/base.qcow2" }}'
+    json_payload = 'json:{ "encrypt.key-secret": "sec0", "driver": "qcow2", "file": { "driver": "file", "filename": "%s" }}' % os.path.join(images_path, "base.qcow2"),
     ext_cnvt = "./qemu-img create -f qcow2 --object secret,id=sec0,data=backing -b".split()
     ext_cnvt.append("%s" %json_payload)
-    ext_cnvt += "-o encrypt.format=luks,encrypt.key-secret=sec0 tmp/overlay1.qcow2 1G".split()
+    ext_cnvt += ("-o encrypt.format=luks,encrypt.key-secret=sec0 %s 1G" % os.path.join(images_path, "overlay.qcow2")).split()
     cmds += [
-             "stat tmp/base.qcow2".split(),
+             ("stat %s" % os.path.join(images_path, "base.qcow2")).split(),
 
              ext_cnvt,
 
-             "./qemu-img convert -f raw -W -E tmp/extents.test -D tmp/base "
-             "tmp/overlay --object secret,id=sec0,data=backing -o encrypt.format=luks,encrypt.key-secret=sec0 tmp/q1.qcow2".split(),
+             ("./qemu-img convert -n -p --object secret,id=sec0,data=backing --image-opts driver=raw,file.filename=%s -W -E %s --base-image-opts driver=raw,file.filename=%s --target-image-opts driver=qcow2,encrypt.format=luks,encrypt.key-secret=sec0,file.filename=%s" % (os.path.join(images_path, "overlay"), os.path.join(images_path, "extents.test"), os.path.join(images_path, "base"), os.path.join(images_path, "overlay.qcow2"))).split(),
 
-             "./qemu-img info tmp/q1.qcow2".split(),
+             ("./qemu-img info %s" % os.path.join(images_path, "overlay.qcow2")).split(),
 
-             "./qemu-img convert --object secret,id=sec0,data=backing -O raw "
-             "--image-opts driver=qcow2,encrypt.key-secret=sec0,file.filename=tmp/q1.qcow2 tmp/q1.raw".split(),
-             "stat tmp/q1.raw".split()
+             ("./qemu-img convert --object secret,id=sec0,data=backing -O raw "
+             "--image-opts driver=qcow2,encrypt.key-secret=sec0,file.filename=%s %s" % (os.path.join(images_path, "overlay.qcow2"), os.path.join(images_path, "overlay.raw"))).split(),
+             ("stat %s" % os.path.join(images_path, "overlay.raw")).split()
             ]
 
     for cmd in cmds:
@@ -62,8 +55,8 @@ def test_iteration(extents):
             import pdb;pdb.set_trace()
         print(cmd)
         subprocess.call(cmd)
-    print("cmp tmp/q1.raw tmp/overlay")
-    assert subprocess.call("cmp tmp/q1.raw tmp/overlay".split()) == 0
+    print("cmp %s %s" % (os.path.join(images_path, "overlay.raw"), os.path.join(images_path, "overlay")))
+    assert subprocess.call(("cmp %s %s" % (os.path.join(images_path, "overlay.raw"), os.path.join(images_path, "overlay"))).split()) == 0
 
 for i in range(100):
     extents = [];

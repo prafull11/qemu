@@ -88,6 +88,7 @@ enum {
     OPTION_MERGE = 274,
     OPTION_BITMAPS = 275,
     OPTION_FORCE = 276,
+    OPTION_BASE_IMAGE_OPTS = 277,
 };
 
 typedef enum OutputFormat {
@@ -2061,7 +2062,6 @@ static void coroutine_fn convert_co_do_copy(void *opaque)
         // skip sectors that are not in extentions
         if (s->extentsfile)
         {
-            //printf("Original: %zd, %d\n", sector_num, n);
             while (true)
             {
                 if (sector_num >= s->total_sectors || s->start_extent == NULL)
@@ -2087,7 +2087,6 @@ static void coroutine_fn convert_co_do_copy(void *opaque)
                     }
                 } else
                 {
-                    //printf("Translated: %zd, %d\n", sector_num, n);
                     break;
                 }
             }
@@ -2412,7 +2411,8 @@ static int img_convert(int argc, char **argv)
     char *options = NULL;
     Error *local_err = NULL;
     bool writethrough, src_writethrough, image_opts = false,
-         skip_create = false, progress = false, tgt_image_opts = false;
+         skip_create = false, progress = false, tgt_image_opts = false,
+	 base_image_opts = false;
     int64_t ret = -EINVAL;
     bool force_share = false;
     bool explict_min_sparse = false;
@@ -2435,6 +2435,7 @@ static int img_convert(int argc, char **argv)
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
             {"force-share", no_argument, 0, 'U'},
             {"target-image-opts", no_argument, 0, OPTION_TARGET_IMAGE_OPTS},
+            {"base-image-opts", required_argument, 0, OPTION_BASE_IMAGE_OPTS},
             {"salvage", no_argument, 0, OPTION_SALVAGE},
             {"target-is-zero", no_argument, 0, OPTION_TARGET_IS_ZERO},
             {"bitmaps", no_argument, 0, OPTION_BITMAPS},
@@ -2563,6 +2564,11 @@ static int img_convert(int argc, char **argv)
             break;
         case OPTION_TARGET_IMAGE_OPTS:
             tgt_image_opts = true;
+            break;
+        case OPTION_BASE_IMAGE_OPTS:
+            base_image_opts = true;
+	    base_fmt=NULL;
+	    basefile = optarg;
             break;
         case OPTION_TARGET_IS_ZERO:
             /*
@@ -2840,7 +2846,7 @@ static int img_convert(int argc, char **argv)
         qemu_opt_foreach(opts, img_add_key_secrets, open_opts, &error_abort);
 
         if (basefile) {
-            list = collect_image_info_list(image_opts, basefile, base_fmt, false,
+            list = collect_image_info_list(base_image_opts, basefile, base_fmt, false,
                                            force_share);
             if (!list) {
                 goto out;
@@ -2937,7 +2943,7 @@ static int img_convert(int argc, char **argv)
     }
 
     if (basefile) {
-        s.basefile = img_open(image_opts, basefile, fmt,
+        s.basefile = img_open(base_image_opts, basefile, base_fmt,
                               0, writethrough, s.quiet, false);
         if (!s.basefile) {
             ret = -1;
