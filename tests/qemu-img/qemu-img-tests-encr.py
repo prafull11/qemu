@@ -45,7 +45,7 @@ for mainloop in range(1):
 
              "./qemu-img create -f qcow2 --object secret,id=sec0,data=backing -b 'json:{ \"encrypt.key-secret\": \"sec0\", \"driver\": \"qcow2\", \"file\": { \"driver\": \"file\", \"filename\": \"%s\" }}' -o encrypt.format=luks,encrypt.key-secret=sec0 %s" % (os.path.join(images_path, "base-encr.qcow2"), os.path.join(images_path, "q4.qcow2")),
              "./qemu-img convert -n --object secret,id=sec0,data=backing --object secret,id=sec2,data=backing --base-image-opts driver=qcow2,encrypt.key-secret=sec0,file.filename=%s --image-opts driver=qcow2,encrypt.key-secret=sec0,file.filename=%s --target-image-opts driver=qcow2,encrypt.format=luks,encrypt.key-secret=sec2,file.filename=%s" % (os.path.join(images_path, "base-encr.qcow2"),  os.path.join(images_path, "overlay-encr.qcow2"), os.path.join(images_path, "q4.qcow2")),
-             "./qemu-img compare -p --object secret,id=sec2,data=backing --image-opts driver=raw,file.filename=%s --image-opts driver=qcow2,encrypt.format=luks,encrypt.key-secret=sec2,file.filename=%s" % (os.path.join(images_path, "overlay"), os.path.join(images_path, "q4.qcow2")),
+             "./qemu-img compare -p --object secret,id=sec2,data=backing --object secret,id=sec0,data=backing --image-opts driver=raw,file.filename=%s --image-opts driver=qcow2,encrypt.format=luks,encrypt.key-secret=sec2,file.filename=%s" % (os.path.join(images_path, "overlay"), os.path.join(images_path, "q4.qcow2")),
              "./qemu-img info %s" % os.path.join(images_path, "q1.qcow2"),
              "./qemu-img info %s" % os.path.join(images_path, "q2.qcow2"),
              "./qemu-img info %s" % os.path.join(images_path, "q3.qcow2"),
