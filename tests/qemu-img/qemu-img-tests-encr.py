@@ -1,9 +1,12 @@
 import os
 import random
 import subprocess
+from pathlib import Path
 
 #images_path = "/var/triliovault-mounts/test1/"
 images_path = os.path.join(os.getcwd(), "tmp")
+Path(images_path).mkdir(parents=True, exist_ok=True)
+
 for mainloop in range(1):
     print("Iteration %d" % mainloop)
     paths = [os.path.join(images_path, 'base.raw'), os.path.join(images_path, 'overlay.raw'), os.path.join(images_path, 'base.qcow2'),

@@ -2,8 +2,11 @@ import operator
 import os
 import random
 import subprocess
+from pathlib import Path
 
 images_path = os.path.join(os.getcwd(), "tmp")
+Path(images_path).mkdir(parents=True, exist_ok=True)
+
 paths = [os.path.join(images_path, 'overlay'), os.path.join(images_path, 'base.qcow2'),
          os.path.join(images_path, 'overlay.qcow2'), os.path.join(images_path, 'q1.qcow2'), os.path.join(images_path, 'q1.raw'),
          os.path.join(images_path, 'extents.test')]
