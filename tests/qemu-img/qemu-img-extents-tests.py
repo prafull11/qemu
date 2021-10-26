@@ -44,7 +44,9 @@ def test_iteration(extents):
 
     for cmd in cmds:
         print(cmd)
-        subprocess.call(cmd.split())
+        my_env = os.environ.copy()
+        my_env["LD_LIBRARY_PATH"] = ".:" + my_env["LD_LIBRARY_PATH"]
+        subprocess.Popen(cmd.split(), env=my_env).wait()
     cmd = "cmp %s %s" % (os.path.join(images_path, "q1.raw"), os.path.join(images_path, "overlay"))
     print(cmd)
     assert subprocess.call(cmd.split()) == 0

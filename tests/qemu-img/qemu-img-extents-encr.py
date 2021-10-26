@@ -36,7 +36,7 @@ def test_iteration(extents):
         for item in extents:
             f.write("%d %d data\n" % (item['offset'], item['length']))
     json_payload = 'json:{ "encrypt.key-secret": "sec0", "driver": "qcow2", "file": { "driver": "file", "filename": "%s" }}' % os.path.join(images_path, "base.qcow2"),
-    ext_cnvt = "./qemu-img create -f qcow2 --object secret,id=sec0,data=backing -b".split()
+    ext_cnvt = "./qemu-img create -f qcow2 --object secret,id=sec0,data=backing -F qcow2 -b".split()
     ext_cnvt.append("%s" %json_payload)
     ext_cnvt += ("-o encrypt.format=luks,encrypt.key-secret=sec0 %s 1G" % os.path.join(images_path, "overlay.qcow2")).split()
     cmds += [
@@ -44,7 +44,7 @@ def test_iteration(extents):
 
              ext_cnvt,
 
-             ("./qemu-img convert -n -p --object secret,id=sec0,data=backing --image-opts driver=raw,file.filename=%s -W -E %s --base-image-opts driver=raw,file.filename=%s --target-image-opts driver=qcow2,encrypt.format=luks,encrypt.key-secret=sec0,file.filename=%s" % (os.path.join(images_path, "overlay"), os.path.join(images_path, "extents.test"), os.path.join(images_path, "base"), os.path.join(images_path, "overlay.qcow2"))).split(),
+             ("./qemu-img convert -n -p --object secret,id=sec0,data=backing --image-opts driver=raw,file.filename=%s -W -E %s -F raw --base-image-opts driver=raw,file.filename=%s --target-image-opts driver=qcow2,encrypt.format=luks,encrypt.key-secret=sec0,file.filename=%s" % (os.path.join(images_path, "overlay"), os.path.join(images_path, "extents.test"), os.path.join(images_path, "base"), os.path.join(images_path, "overlay.qcow2"))).split(),
 
              ("./qemu-img info %s" % os.path.join(images_path, "overlay.qcow2")).split(),
 
@@ -54,10 +54,10 @@ def test_iteration(extents):
             ]
 
     for cmd in cmds:
-        if 'q1.qcow2' in cmds:
-            import pdb;pdb.set_trace()
         print(cmd)
-        subprocess.call(cmd)
+        my_env = os.environ.copy()
+        my_env["LD_LIBRARY_PATH"] = ".:" + my_env["LD_LIBRARY_PATH"]
+        subprocess.Popen(cmd, env=my_env).wait()
     print("cmp %s %s" % (os.path.join(images_path, "overlay.raw"), os.path.join(images_path, "overlay")))
     assert subprocess.call(("cmp %s %s" % (os.path.join(images_path, "overlay.raw"), os.path.join(images_path, "overlay"))).split()) == 0
 

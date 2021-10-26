@@ -24,7 +24,7 @@ for mainloop in range(1):
     cmds.append("./qemu-img convert -p -f raw %s -O qcow2  %s" % (os.path.join(images_path, "base"), os.path.join(images_path, "base.qcow2")))
     cmds.append("./qemu-img convert -p -f raw --object secret,id=sec2,data=backing %s -O qcow2 -o encrypt.format=luks,encrypt.key-secret=sec2 %s" % (os.path.join(images_path, "base"), os.path.join(images_path, "base-encr.qcow2")))
     cmds.append("./qemu-img compare -p --object secret,id=sec0,data=backing --image-opts driver=raw,file.filename=%s --image-opts driver=qcow2,encrypt.key-secret=sec0,file.filename=%s" % (os.path.join(images_path, 'base'), os.path.join(images_path, 'base-encr.qcow2')))
-    for i in range(1000):
+    for i in range(1):
        blk = random.randrange(10240)
        cmds.append("dd if=/dev/urandom of=%s conv=nocreat,notrunc seek=%d bs=512 count=1" % (os.path.join(images_path, 'overlay'), blk))
     cmds.append("./qemu-img convert -p -f raw %s -O qcow2  %s" % (os.path.join(images_path, "overlay"), os.path.join(images_path, "overlay.qcow2")))
@@ -36,14 +36,14 @@ for mainloop in range(1):
 
     cmds += [
              "./qemu-img convert -f raw -O qcow2 -D %s -F raw %s %s" % (os.path.join(images_path, "base"),  os.path.join(images_path, "overlay"), os.path.join(images_path, "q1.qcow2")),
-             "./qemu-img rebase -u -b %s %s" % (os.path.join(images_path, "base"), os.path.join(images_path, "q1.qcow2")),
+             "./qemu-img rebase -u -F raw -b %s %s" % (os.path.join(images_path, "base"), os.path.join(images_path, "q1.qcow2")),
              "./qemu-img convert -f qcow2 -O qcow2 -D %s -F qcow2 %s %s" % (os.path.join(images_path, "base.qcow2"),  os.path.join(images_path, "overlay.qcow2"), os.path.join(images_path, "q2.qcow2")),
-             "./qemu-img rebase -u -b %s %s" % (os.path.join(images_path, "base.qcow2"), os.path.join(images_path, "q2.qcow2")),
+             "./qemu-img rebase -u -F qcow2 -b %s %s" % (os.path.join(images_path, "base.qcow2"), os.path.join(images_path, "q2.qcow2")),
              "./qemu-img convert --object secret,id=sec0,data=backing --image-opts driver=qcow2,encrypt.key-secret=sec0,file.filename=%s -D %s -O qcow2 -o encrypt.format=luks,encrypt.key-secret=sec0 %s" % (os.path.join(images_path, "overlay-encr.qcow2"), os.path.join(images_path, "base.qcow2"), os.path.join(images_path, "q3.qcow2")),
-             "./qemu-img rebase  --object secret,id=sec0,data=backing --image-opts driver=qcow2,encrypt.key-secret=sec0,file.filename=%s -b %s" % (os.path.join(images_path, "q3.qcow2"), os.path.join(images_path, "base.qcow2")),
+             "./qemu-img rebase  --object secret,id=sec0,data=backing --image-opts driver=qcow2,encrypt.key-secret=sec0,file.filename=%s -F qcow2 -b %s" % (os.path.join(images_path, "q3.qcow2"), os.path.join(images_path, "base.qcow2")),
              "./qemu-img compare -p --object secret,id=sec2,data=backing --image-opts driver=raw,file.filename=%s --image-opts driver=qcow2,encrypt.format=luks,encrypt.key-secret=sec2,file.filename=%s" % (os.path.join(images_path, "overlay"), os.path.join(images_path, "q3.qcow2")),
 
-             "./qemu-img create -f qcow2 --object secret,id=sec0,data=backing -b 'json:{ \"encrypt.key-secret\": \"sec0\", \"driver\": \"qcow2\", \"file\": { \"driver\": \"file\", \"filename\": \"%s\" }}' -o encrypt.format=luks,encrypt.key-secret=sec0 %s" % (os.path.join(images_path, "base-encr.qcow2"), os.path.join(images_path, "q4.qcow2")),
+             "./qemu-img create -f qcow2 --object secret,id=sec0,data=backing -F qcow2 -b 'json:{ \"encrypt.key-secret\": \"sec0\", \"driver\": \"qcow2\", \"file\": { \"driver\": \"file\", \"filename\": \"%s\" }}' -o encrypt.format=luks,encrypt.key-secret=sec0 %s" % (os.path.join(images_path, "base-encr.qcow2"), os.path.join(images_path, "q4.qcow2")),
              "./qemu-img convert -n --object secret,id=sec0,data=backing --object secret,id=sec2,data=backing --base-image-opts driver=qcow2,encrypt.key-secret=sec0,file.filename=%s --image-opts driver=qcow2,encrypt.key-secret=sec0,file.filename=%s --target-image-opts driver=qcow2,encrypt.format=luks,encrypt.key-secret=sec2,file.filename=%s" % (os.path.join(images_path, "base-encr.qcow2"),  os.path.join(images_path, "overlay-encr.qcow2"), os.path.join(images_path, "q4.qcow2")),
              "./qemu-img compare -p --object secret,id=sec2,data=backing --object secret,id=sec0,data=backing --image-opts driver=raw,file.filename=%s --image-opts driver=qcow2,encrypt.format=luks,encrypt.key-secret=sec2,file.filename=%s" % (os.path.join(images_path, "overlay"), os.path.join(images_path, "q4.qcow2")),
              "./qemu-img info %s" % os.path.join(images_path, "q1.qcow2"),
@@ -69,7 +69,9 @@ for mainloop in range(1):
                 else:
                     c.append(t)
             print(c)
-            subprocess.call(c)
+            my_env = os.environ.copy()
+            my_env["LD_LIBRARY_PATH"] = ".:" + my_env["LD_LIBRARY_PATH"]
+            subprocess.Popen(c, env=my_env).wait()
         cmp_command = "cmp %s %s" % (os.path.join(images_path, "q1.raw"), os.path.join(images_path, "overlay"))
         assert subprocess.call(cmp_command.split()) == 0
         cmp_command = "cmp %s %s" % (os.path.join(images_path, "q2.raw"), os.path.join(images_path, "overlay"))
