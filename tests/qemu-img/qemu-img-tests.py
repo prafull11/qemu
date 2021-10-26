@@ -36,7 +36,7 @@ for mainloop in range(1):
             print(cmd)
             #if 'qemu-img convert' in cmd:
             my_env = os.environ.copy()
-            my_env["LD_LIBRARY_PATH"] = ".:" + my_env["LD_LIBRARY_PATH"]
+            my_env["LD_LIBRARY_PATH"] = ".:" + my_env.get("LD_LIBRARY_PATH", "")
             subprocess.Popen(cmd.split(), env=my_env).wait()
         cmp_command = "cmp %s %s" % (os.path.join(images_path, "q1.raw"), os.path.join(images_path, "overlay"))
         print(cmp_command)

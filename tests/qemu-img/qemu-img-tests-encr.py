@@ -70,7 +70,7 @@ for mainloop in range(1):
                     c.append(t)
             print(c)
             my_env = os.environ.copy()
-            my_env["LD_LIBRARY_PATH"] = ".:" + my_env["LD_LIBRARY_PATH"]
+            my_env["LD_LIBRARY_PATH"] = ".:" + my_env.get("LD_LIBRARY_PATH", "")
             subprocess.Popen(c, env=my_env).wait()
         cmp_command = "cmp %s %s" % (os.path.join(images_path, "q1.raw"), os.path.join(images_path, "overlay"))
         assert subprocess.call(cmp_command.split()) == 0
