@@ -959,6 +959,7 @@ static int img_commit(int argc, char **argv)
             {"help", no_argument, 0, 'h'},
             {"object", required_argument, 0, OPTION_OBJECT},
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
+            {"base-image-opts", required_argument, 0, OPTION_BASE_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
         c = getopt_long(argc, argv, ":f:ht:b:dpqr:",
@@ -1007,6 +1008,11 @@ static int img_commit(int argc, char **argv)
             break;
         case OPTION_IMAGE_OPTS:
             image_opts = true;
+            break;
+        case OPTION_BASE_IMAGE_OPTS:
+            image_opts = true;
+            fmt=NULL;
+            filename = optarg;
             break;
         }
     }
